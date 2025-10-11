@@ -1,0 +1,367 @@
+from aiogram import Router, F, Bot
+from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+
+from core.keyboards import master_main_kb, order_status_kb, master_orders_kb
+from services.services import OrderService, MasterService
+from models import OrderStatus, Master
+from core.utils import get_status_emoji, format_money
+from filters.role import RoleFilter
+
+router = Router()
+
+
+# ==================== FSM States ====================
+class MasterStates(StatesGroup):
+    waiting_work_amount = State()
+    waiting_expenses = State()
+    waiting_admin_message = State()
+
+
+# ==================== Главное меню ====================
+@router.message(F.text == "/start", RoleFilter("master"))
+async def master_start(msg: Message, state: FSMContext, master: Master):
+    await state.clear()
+    await msg.answer(
+        f"🔧 Привет, {master.name}!\n"
+        f"Выберите действие:",
+        reply_markup=master_main_kb()
+    )
+
+
+# ==================== Мои заявки ====================
+@router.message(F.text == "📋 Мои заявки")
+async def my_orders(msg: Message, state: FSMContext, master: Master, master_service: MasterService):
+    """Список заявок мастера"""
+    await state.clear()  # Ensure state is cleared for menu actions
+    orders = await master_service.get_master_orders(master.id)
+    
+    if not orders:
+        await msg.answer(
+            "📋 У вас пока нет заявок.\n"
+            "Ожидайте назначения от администратора.",
+            reply_markup=master_main_kb()
+        )
+        return
+    
+    # Разделяем на активные и завершенные
+    active = [o for o in orders if o.status in [
+        OrderStatus.new,
+        OrderStatus.confirmed,
+        OrderStatus.in_progress,
+        OrderStatus.arrived
+    ]]
+    
+    completed = [o for o in orders if o.status == OrderStatus.completed]
+    
+    text = "📋 Ваши заявки:\n\n"
+    
+    if active:
+        text += "🔄 Активные:\n"
+        for order in active[:5]:
+            emoji = get_status_emoji(order.status.value)
+            text += (
+                f"{emoji} #{order.number}\n"
+                f"  Клиент: {order.client_name}\n"
+                f"  Адрес: {order.address}\n"
+                f"  Время: {order.datetime.strftime('%d.%m %H:%M')}\n\n"
+            )
+    
+    if completed:
+        text += f"\n✅ Завершено: {len(completed)}"
+    
+    await msg.answer(text, reply_markup=master_orders_kb(bool(active)))
+
+
+# ==================== Управление статусом ====================
+@router.callback_query(F.data.startswith("confirm_"))
+async def confirm_order(
+    callback: CallbackQuery,
+    master: Master,
+    order_service: OrderService
+):
+    """Подтверждение заявки"""
+    order_id = int(callback.data.split("_")[1])
+    order = await order_service.update_status(order_id, OrderStatus.confirmed)
+    
+    await callback.message.edit_text(
+        f"✅ Вы подтвердили заявку #{order.number}!\n\n"
+        f"📍 Адрес: {order.address}\n"
+        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
+        f"💬 Проблема: {order.comment}",
+        reply_markup=order_status_kb(order.id)
+    )
+    await callback.answer("✅ Заявка подтверждена")
+
+
+@router.callback_query(F.data.startswith("depart_"))
+async def depart_order(
+    callback: CallbackQuery,
+    order_service: OrderService
+):
+    """Выезд к клиенту"""
+    order_id = int(callback.data.split("_")[1])
+    order = await order_service.update_status(order_id, OrderStatus.in_progress)
+    
+    await callback.message.edit_text(
+        f"🚗 Вы выехали на заявку #{order.number}!\n\n"
+        f"📍 Адрес: {order.address}\n"
+        f"📞 Телефон: {order.phone}",
+        reply_markup=order_status_kb(order.id)
+    )
+    await callback.answer("🚗 В пути")
+
+
+@router.callback_query(F.data.startswith("arrive_"))
+async def arrive_order(
+    callback: CallbackQuery,
+    order_service: OrderService
+):
+    """Прибытие на место"""
+    order_id = int(callback.data.split("_")[1])
+    order = await order_service.update_status(order_id, OrderStatus.arrived)
+    
+    await callback.message.edit_text(
+        f"🏠 Вы прибыли на заявку #{order.number}!\n\n"
+        f"Начинайте работу.\n"
+        f"После завершения нажмите 'Завершить'.",
+        reply_markup=order_status_kb(order.id)
+    )
+    await callback.answer("🏠 Прибыли")
+
+
+@router.callback_query(F.data.startswith("complete_"))
+async def complete_order_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+    """Начало завершения заявки"""
+    order_id = int(callback.data.split("_")[1])
+    await state.update_data(order_id=order_id)
+    await state.set_state(MasterStates.waiting_work_amount)
+    
+    await callback.message.edit_text(
+        "💰 Введите сумму работы (в ₽):\n"
+        "Например: 1500"
+    )
+    await callback.answer()
+
+
+@router.message(MasterStates.waiting_work_amount)
+async def process_work_amount(msg: Message, state: FSMContext):
+    """Обработка суммы работы"""
+    try:
+        work_amount = float(msg.text.strip())
+        if work_amount < 0:
+            await msg.answer("❌ Сумма не может быть отрицательной. Попробуйте снова:")
+            return
+        
+        await state.update_data(work_amount=work_amount)
+        await state.set_state(MasterStates.waiting_expenses)
+        await msg.answer(
+            "💵 Введите расходы (запчасти, транспорт и т.д.):\n"
+            "Или отправьте '0' если расходов не было"
+        )
+    except ValueError:
+        await msg.answer("❌ Неверный формат. Введите число, например: 150000")
+
+
+@router.message(MasterStates.waiting_expenses)
+async def complete_order_finish(
+    msg: Message,
+    state: FSMContext,
+    order_service: OrderService
+):
+    """Завершение заявки с расчетом"""
+    try:
+        expenses = float(msg.text.strip())
+        if expenses < 0:
+            await msg.answer("❌ Расходы не могут быть отрицательными. Попробуйте снова:")
+            return
+        
+        data = await state.get_data()
+        order = await order_service.update_status(
+            order_id=data["order_id"],
+            status=OrderStatus.completed,
+            work_amount=data["work_amount"],
+            expenses=expenses
+        )
+        
+        await msg.answer(
+            f"✅ Заявка #{order.number} завершена!\n\n"
+            f"💰 Сумма работы: {format_money(order.work_amount)}\n"
+            f"💵 Расходы: {format_money(order.expenses)}\n"
+            f"💎 Прибыль: {format_money(order.profit)}\n\n"
+            f"Отличная работа! 👏",
+            reply_markup=master_main_kb()
+        )
+        await state.clear()
+        
+    except ValueError:
+        await msg.answer("❌ Неверный формат. Введите число, например: 50000")
+
+
+@router.callback_query(F.data.startswith("reject_"))
+async def reject_order(
+    callback: CallbackQuery,
+    order_service: OrderService
+):
+    """Отказ от заявки"""
+    order_id = int(callback.data.split("_")[1])
+    order = await order_service.update_status(order_id, OrderStatus.rejected)
+    
+    await callback.message.edit_text(
+        f"❌ Вы отказались от заявки #{order.number}\n\n"
+        f"Заявка будет переназначена другому мастеру."
+    )
+    await callback.answer("Заявка отклонена")
+
+
+# ==================== График ====================
+@router.message(F.text == "📅 График")
+async def show_schedule(msg: Message, state: FSMContext, master: Master):
+    """Показать график работы"""
+    await state.clear()
+    if not master.schedule:
+        await msg.answer(
+            "📅 Ваш график пуст.\n"
+            "График автоматически заполняется при назначении заявок.",
+            reply_markup=master_main_kb()
+        )
+        return
+    
+    text = "📅 Ваш график:\n\n"
+    
+    sorted_dates = sorted(master.schedule.keys())
+    
+    for date_str in sorted_dates[:7]:
+        times = master.schedule[date_str]
+        if times:
+            text += f"📆 {date_str}:\n"
+            for time in sorted(times):
+                text += f"  • {time}\n"
+            text += "\n"
+    
+    await msg.answer(text, reply_markup=master_main_kb())
+
+
+# ==================== Сообщение админу ====================
+@router.message(F.text == "💬 Админу")
+async def message_admin_start(msg: Message, state: FSMContext):
+    """Начало отправки сообщения админу"""
+    await state.clear()
+    await state.set_state(MasterStates.waiting_admin_message)
+    await msg.answer(
+        "💬 Напишите сообщение администратору:\n"
+        "(или отправьте /cancel для отмены)"
+    )
+
+
+@router.message(MasterStates.waiting_admin_message)
+async def send_message_to_admin(msg: Message, state: FSMContext, master: Master, bot: Bot):
+    """Отправка сообщения админу"""
+    from config import ADMIN_IDS
+    
+    admin_message = (
+        f"📨 Сообщение от мастера:\n\n"
+        f"👤 {master.name} (ID: {master.telegram_id})\n"
+        f"💬 {msg.text}"
+    )
+    
+    success_count = 0
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, admin_message)
+            success_count += 1
+        except Exception:
+            continue
+    
+    if success_count > 0:
+        await msg.answer(
+            "✅ Сообщение отправлено администратору!",
+            reply_markup=master_main_kb()
+        )
+    else:
+        await msg.answer(
+            "❌ Не удалось отправить сообщение.\n"
+            "Попробуйте позже.",
+            reply_markup=master_main_kb()
+        )
+    
+    await state.clear()
+
+
+
+@router.callback_query(F.data == "master_orders_active")
+async def show_active_orders(
+    callback: CallbackQuery,
+    master: Master,
+    master_service: MasterService
+):
+    """Показать только активные заявки"""
+    orders = await master_service.get_master_orders(master.id)
+    
+    active = [o for o in orders if o.status in [
+        OrderStatus.new,
+        OrderStatus.confirmed,
+        OrderStatus.in_progress,
+        OrderStatus.arrived
+    ]]
+    
+    if not active:
+        await callback.message.edit_text(
+            "📋 Нет активных заявок",
+            reply_markup=master_orders_kb()
+        )
+        await callback.answer()
+        return
+    
+    text = "🔄 Активные заявки:\n\n"
+    for order in active:
+        emoji = get_status_emoji(order.status.value)
+        text += (
+            f"{emoji} #{order.number}\n"
+            f"  Клиент: {order.client_name}\n"
+            f"  Адрес: {order.address}\n"
+            f"  Время: {order.datetime.strftime('%d.%m %H:%M')}\n"
+            f"  Статус: {order.status.value}\n\n"
+        )
+    
+    await callback.message.edit_text(text, reply_markup=master_orders_kb())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "master_orders_archive")
+async def show_archive_orders(
+    callback: CallbackQuery,
+    master: Master,
+    master_service: MasterService
+):
+
+    orders = await master_service.get_master_orders(master.id)
+    
+    completed = [o for o in orders if o.status == OrderStatus.completed]
+    
+    if not completed:
+        await callback.message.edit_text(
+            "📋 Архив пуст",
+            reply_markup=master_orders_kb()
+        )
+        await callback.answer()
+        return
+    
+    text = "✅ Завершенные заявки:\n\n"
+    total_profit = 0
+    
+    for order in completed[:10]:  # Последние 10
+        text += (
+            f"#{order.number} - {order.client_name}\n"
+            f"  Прибыль: {format_money(order.profit)}\n"
+        )
+        total_profit += order.profit
+    
+    text += f"\n💎 Общая прибыль: {format_money(total_profit)}"
+    
+    await callback.message.edit_text(text, reply_markup=master_orders_kb())
+    await callback.answer()
