@@ -255,6 +255,35 @@ class MasterService:
     async def update_schedule(self, master_id: int, dt: datetime, status: str):
         """Update master's schedule"""
         await self.master_repo.update_schedule(master_id, dt, status)
+    
+    # НОВЫЙ МЕТОД: Поиск доступного мастера
+    async def find_available_master(
+        self,
+        datetime: datetime,
+        skill_ids: List[int]
+    ) -> Optional[Master]:
+        """
+        Найти свободного мастера с нужными навыками на указанное время
+        
+        Args:
+            datetime: Время заказа
+            skill_ids: Список ID необходимых навыков
+            
+        Returns:
+            Master объект или None если не найден
+        """
+        if not skill_ids:
+            return None
+        
+        # Получаем всех мастеров с нужными навыками
+        masters = await self.master_repo.get_by_skills(skill_ids)
+        
+        # Проверяем каждого мастера на доступность
+        for master in masters:
+            if await self.master_repo.is_free_at(master.id, datetime):
+                return master
+        
+        return None
 
 
 class SkillService:

@@ -20,6 +20,7 @@ class MasterStates(StatesGroup):
     waiting_work_photos = State()
     waiting_work_description = State()
     waiting_admin_message = State()
+    waiting_reject_reason = State()  # НОВОЕ: ожидание причины отказа
 
 
 # ==================== Adminlarga xabar yuborish ====================
@@ -304,8 +305,6 @@ async def skip_photos(msg: Message, state: FSMContext):
     )
 
 
-
-
 @router.message(MasterStates.waiting_work_photos)
 async def invalid_photo_input(msg: Message):
     """Неверный ввод при ожидании фото"""
@@ -372,34 +371,153 @@ async def complete_order_finish(
     await state.clear()
 
 
+# ==================== НОВОЕ: Отказ с причиной ====================
 @router.callback_query(F.data.startswith("reject_"))
-async def reject_order(
+async def reject_order_ask_reason(
     callback: CallbackQuery,
-    master: Master,
-    order_service: OrderService,
-    bot: Bot
+    state: FSMContext
 ):
-    """Отказ от заявки"""
+    """Запрос причины отказа"""
     order_id = int(callback.data.split("_")[1])
-    order = await order_service.update_status(order_id, OrderStatus.rejected)
-    
-    # Adminlarga xabar
-    await notify_admins(
-        bot,
-        f"❌ Мастер отказался от заказа!\n\n"
-        f"👤 Мастер: {master.name}\n"
-        f"📋 Заказ: #{order.number}\n"
-        f"👥 Клиент: {order.client_name}\n"
-        f"📍 Адрес: {order.address}\n\n"
-        f"⚠️ Требуется переназначение заказа!"
-    )
+    await state.update_data(reject_order_id=order_id)
+    await state.set_state(MasterStates.waiting_reject_reason)
     
     await callback.message.edit_text(
-        f"❌ Вы отказались от заявки #{order.number}\n\n"
-        f"Заявка будет переназначена другому мастеру.",
-        reply_markup=master_main_kb()
+        "❌ Укажите причину отказа от заявки:\n\n"
+        "Например:\n"
+        "- Занят на другом объекте\n"
+        "- Слишком далеко\n"
+        "- Нет нужных запчастей\n"
+        "- Проблема не по моей специализации"
     )
-    await callback.answer("Заявка отклонена")
+    await callback.answer()
+
+
+@router.message(MasterStates.waiting_reject_reason)
+async def reject_order_with_reason(
+    msg: Message,
+    state: FSMContext,
+    master: Master,
+    order_service: OrderService,
+    master_service: MasterService,
+    bot: Bot
+):
+    """Отказ от заявки с причиной и попытка переназначения"""
+    reject_reason = msg.text.strip()
+    
+    if len(reject_reason) < 5:
+        await msg.answer("❌ Причина слишком короткая. Укажите более подробно:")
+        return
+    
+    data = await state.get_data()
+    order_id = data["reject_order_id"]
+    
+    # Получаем заказ с навыками
+    order = await order_service.order_repo.get_with_skills(order_id)
+    if not order:
+        await msg.answer("❌ Заявка не найдена!", reply_markup=master_main_kb())
+        await state.clear()
+        return
+    
+    # Обновляем статус на rejected
+    order.status = OrderStatus.rejected
+    
+    # Удаляем назначение на текущего мастера
+    assignment = await order_service.assignment_repo.get_by_order(order_id)
+    if assignment:
+        await order_service.assignment_repo.delete(assignment.id)
+    
+    # Освобождаем время в графике мастера
+    await master_service.update_schedule(master.id, order.datetime, "free")
+    
+    await order_service.session.commit()
+    
+    # Сохраняем причину отказа в комментарий или отдельное поле
+    # (если нужно, добавьте поле reject_reason в модель Order)
+    
+    # Пытаемся найти другого мастера автоматически
+    skill_ids = [s.id for s in order.required_skills] if order.required_skills else []
+    new_master = await master_service.find_available_master(
+        datetime=order.datetime,
+        skill_ids=skill_ids
+    )
+    
+    if new_master:
+        # Назначаем новому мастеру
+        await order_service.assignment_repo.create(order_id=order_id, master_id=new_master.id)
+        order.status = OrderStatus.confirmed
+        await master_service.update_schedule(new_master.id, order.datetime, "busy")
+        await order_service.session.commit()
+        
+        # Уведомляем нового мастера
+        await bot.send_message(
+            new_master.telegram_id,
+            f"🆕 Новая заявка #{order.number}!\n\n"
+            f"👤 Клиент: {order.client_name}\n"
+            f"📞 Телефон: {order.phone}\n"
+            f"📍 Адрес: {order.address}\n"
+            f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
+            f"🔧 Техника: {order.type} {order.brand} {order.model}\n"
+            f"💬 Проблема: {order.comment}",
+            reply_markup=order_status_kb(order.id, order.status)
+        )
+        
+        # Уведомляем админа об успешном переназначении
+        await notify_admins(
+            bot,
+            f"❌ Мастер отказался от заказа\n\n"
+            f"👤 Отказался: {master.name}\n"
+            f"💬 Причина: {reject_reason}\n\n"
+            f"✅ Заказ автоматически переназначен:\n"
+            f"👤 Новый мастер: {new_master.name}\n"
+            f"📋 Заказ: #{order.number}\n"
+            f"👥 Клиент: {order.client_name}\n"
+            f"📍 Адрес: {order.address}\n"
+            f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}"
+        )
+        
+        await msg.answer(
+            f"❌ Вы отказались от заявки #{order.number}\n\n"
+            f"✅ Заявка автоматически назначена другому мастеру.",
+            reply_markup=master_main_kb()
+        )
+    else:
+        # Не найден свободный мастер - требуется ручное назначение админом
+        from core.keyboards import manual_master_selection_kb
+        
+        admin_kb = await manual_master_selection_kb(order.id)
+        
+        await notify_admins(
+            bot,
+            f"❌ Мастер отказался от заказа!\n\n"
+            f"👤 Отказался: {master.name}\n"
+            f"💬 Причина: {reject_reason}\n\n"
+            f"⚠️ Свободный мастер не найден!\n"
+            f"📋 Заказ: #{order.number}\n"
+            f"👥 Клиент: {order.client_name}\n"
+            f"📍 Адрес: {order.address}\n"
+            f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"👇 Назначьте мастера вручную:"
+        )
+        
+        # Отправляем клавиатуру для ручного назначения админу
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"Выберите мастера для заявки #{order.number}:",
+                    reply_markup=admin_kb
+                )
+            except Exception:
+                continue
+        
+        await msg.answer(
+            f"❌ Вы отказались от заявки #{order.number}\n\n"
+            f"⚠️ Заявка требует назначения администратором.",
+            reply_markup=master_main_kb()
+        )
+    
+    await state.clear()
 
 
 # ==================== График ====================

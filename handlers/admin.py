@@ -166,17 +166,16 @@ async def toggle_order_skill(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data == "skills_done", AdminStates.updating_master_skills)
-async def finish_update_skills(callback: CallbackQuery, state: FSMContext, master_service: MasterService):
+@router.callback_query(F.data == "skills_done", AdminStates.waiting_skills)
+async def skills_done(callback: CallbackQuery, state: FSMContext):
+    """Завершение выбора навыков"""
     data = await state.get_data()
-    master_id = data.get("master_id")
-    skill_ids = data.get("selected_skills", [])
+    if not data.get("selected_skills"):
+        await callback.answer("❌ Выберите хотя бы один навык!", show_alert=True)
+        return
     
-    if master_id:
-        await master_service.update_skills(master_id, skill_ids)
-    
-    await state.set_state(AdminStates.selecting_master_to_update)
-    await callback.message.edit_text("✅ Навыки обновлены. Вернитесь к меню.")
+    await state.set_state(AdminStates.waiting_type)
+    await callback.message.edit_text("🔧 Введите тип техники (например: стиральная машина, холодильник):")
     await callback.answer()
 
 
@@ -257,9 +256,20 @@ async def create_order(msg: Message, state: FSMContext, order_service: OrderServ
     # await state.clear()  # Не очищаем, если переходим к manual selection
 
 
+# Admin.py fayliga qo'shing yoki mavjudini yangilang
+
+# Mavjud manual_assign_master handlerini o'chirib, ushbu ikki handlega almashtiring:
+
+# 1. Yangi yaratilgan zakazlar uchun (AdminStates.manual_master_selection state bilan)
 @router.callback_query(F.data.startswith("assign_manual_"), AdminStates.manual_master_selection)
-async def manual_assign_master(callback: CallbackQuery, state: FSMContext, order_service: OrderService, master_service: MasterService, bot: Bot):
-    """Ручное назначение мастера"""
+async def manual_assign_master_from_creation(
+    callback: CallbackQuery, 
+    state: FSMContext, 
+    order_service: OrderService, 
+    master_service: MasterService, 
+    bot: Bot
+):
+    """Ручное назначение мастера при создании заявки"""
     parts = callback.data.split("_")
     master_id = int(parts[2])
     order_id = int(parts[3])
@@ -292,7 +302,7 @@ async def manual_assign_master(callback: CallbackQuery, state: FSMContext, order
         f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
         f"🔧 Техника: {order.type} {order.brand} {order.model}\n"
         f"💬 Проблема: {order.comment}",
-        reply_markup=order_status_kb(order_id)
+        reply_markup=order_status_kb(order_id, order.status)
     )
     
     await callback.message.answer("Выберите действие:", reply_markup=admin_main_kb())
@@ -300,12 +310,87 @@ async def manual_assign_master(callback: CallbackQuery, state: FSMContext, order
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("cancel_manual_"))
-async def cancel_manual_assignment(callback: CallbackQuery, state: FSMContext):
+# 2. Master rad etganda adminlarga yuborilgan xabar uchun (STATE SETSIZ!)
+@router.callback_query(F.data.startswith("assign_manual_"))
+async def manual_assign_master_from_reject(
+    callback: CallbackQuery, 
+    order_service: OrderService, 
+    master_service: MasterService, 
+    bot: Bot
+):
+    """Ручное назначение мастера после отказа (БЕЗ STATE)"""
+    parts = callback.data.split("_")
+    master_id = int(parts[2])
+    order_id = int(parts[3])
+    
+    master = await master_service.master_repo.get(master_id)
+    if not master:
+        await callback.answer("❌ Мастер не найден!")
+        return
+    
+    # Проверяем что заказ еще не назначен
+    existing = await order_service.assignment_repo.get_by_order(order_id)
+    if existing:
+        await callback.answer("❌ Заявка уже назначена другому мастеру!", show_alert=True)
+        await callback.message.edit_text(
+            f"⚠️ Заявка #{order_id} уже назначена.\n"
+            f"Мастер: {existing.master.name}"
+        )
+        return
+    
+    # Получаем заказ
+    order = await order_service.order_repo.get(order_id)
+    if not order:
+        await callback.answer("❌ Заявка не найдена!")
+        return
+    
+    # Назначаем
+    await order_service.assignment_repo.create(order_id=order_id, master_id=master_id)
+    order.status = OrderStatus.confirmed
+    await master_service.update_schedule(master_id, order.datetime, "busy")
+    await order_service.session.commit()
+    
+    await callback.message.edit_text(
+        f"✅ Мастер {master.name} назначен на заявку #{order.number}!\n"
+        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"Уведомление отправлено мастеру."
+    )
+    
+    # Уведомление мастеру
+    await bot.send_message(
+        master.telegram_id,
+        f"🆕 Новая заявка #{order.number}!\n\n"
+        f"👤 Клиент: {order.client_name}\n"
+        f"📞 Телефон: {order.phone}\n"
+        f"📍 Адрес: {order.address}\n"
+        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
+        f"🔧 Техника: {order.type} {order.brand} {order.model}\n"
+        f"💬 Проблема: {order.comment}",
+        reply_markup=order_status_kb(order.id, order.status)
+    )
+    
+    await callback.answer("✅ Мастер назначен!")
+
+
+# Shuningdek cancel_manual_ uchun ham STATE SETSIZ handler qo'shing:
+
+@router.callback_query(F.data.startswith("cancel_manual_"), AdminStates.manual_master_selection)
+async def cancel_manual_assignment_with_state(callback: CallbackQuery, state: FSMContext):
+    """Отмена при создании заявки"""
     await state.clear()
     await callback.message.answer(
         "⚠️ Заявка создана без мастера. Система попробует назначить позже.",
         reply_markup=admin_main_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cancel_manual_"))
+async def cancel_manual_assignment_no_state(callback: CallbackQuery):
+    """Отмена после отказа мастера"""
+    await callback.message.edit_text(
+        "❌ Назначение отменено.\n"
+        "Заявка осталась без мастера."
     )
     await callback.answer()
 
@@ -347,8 +432,9 @@ async def filter_orders(callback: CallbackQuery, order_service: OrderService):
     
     text = f"📋 Заявки ({filter_type}):\n\n"
     builder = InlineKeyboardBuilder()
+    
     for order in orders[:10]:
-        # НОВОЕ: Полная информация о заявке
+        # Получаем информацию о мастере
         assignment = await order_service.assignment_repo.get_by_order(order.id)
         assigned_master = assignment.master.name if assignment and assignment.master else "Не назначен"
         
@@ -362,23 +448,23 @@ async def filter_orders(callback: CallbackQuery, order_service: OrderService):
             f"💬 Проблема: {order.comment[:50]}{'...' if len(order.comment) > 50 else ''}\n\n"
         )
         
-        # Добавляем кнопку назначения, если не назначен и статус new
-        if assigned_master == "Не назначен" and order.status == OrderStatus.new:
+        # НОВОЕ: Добавляем кнопку назначения для всех незаназначенных или отклоненных заявок
+        if assigned_master == "Не назначен" and order.status in [OrderStatus.new, OrderStatus.rejected]:
             builder.row(
                 InlineKeyboardButton(
-                    text=f"👤 Назначить #{order.number}",
+                    text=f"👤 Назначить мастера #{order.number}",
                     callback_data=f"assign_order_{order.id}"
                 )
             )
     
     # Добавляем кнопки фильтров
     builder.row(
-        InlineKeyboardButton(text="Все", callback_data="filter_all"),
-        InlineKeyboardButton(text="Новые", callback_data="filter_new")
+        InlineKeyboardButton(text="📋 Все", callback_data="filter_all"),
+        InlineKeyboardButton(text="🆕 Новые", callback_data="filter_new")
     )
     builder.row(
-        InlineKeyboardButton(text="В работе", callback_data="filter_work"),
-        InlineKeyboardButton(text="Завершённые", callback_data="filter_done")
+        InlineKeyboardButton(text="⚙️ В работе", callback_data="filter_work"),
+        InlineKeyboardButton(text="✅ Готовые", callback_data="filter_done")
     )
     
     markup = builder.as_markup()
@@ -387,6 +473,7 @@ async def filter_orders(callback: CallbackQuery, order_service: OrderService):
     await callback.answer()
 
 
+# НОВОЕ: Обновленный start_assign_existing_order handler
 @router.callback_query(F.data.startswith("assign_order_"))
 async def start_assign_existing_order(callback: CallbackQuery, state: FSMContext, order_service: OrderService):
     """Начало ручного назначения для существующей незанятой заявки"""
@@ -396,14 +483,15 @@ async def start_assign_existing_order(callback: CallbackQuery, state: FSMContext
         await callback.answer("❌ Заявка не найдена!")
         return
     
-    if order.status != OrderStatus.new:
-        await callback.answer("❌ Можно назначать только новые заявки!")
+    # ИЗМЕНЕНО: Разрешаем назначать не только новые, но и отклоненные заявки
+    if order.status not in [OrderStatus.new, OrderStatus.rejected]:
+        await callback.answer("❌ Можно назначать только новые или отклоненные заявки!", show_alert=True)
         return
     
     # Проверяем, назначен ли уже
     assignment = await order_service.assignment_repo.get_by_order(order_id)
     if assignment:
-        await callback.answer("❌ Заявка уже назначена!")
+        await callback.answer("❌ Заявка уже назначена!", show_alert=True)
         return
     
     await state.update_data(
@@ -414,10 +502,20 @@ async def start_assign_existing_order(callback: CallbackQuery, state: FSMContext
     await state.set_state(AdminStates.manual_master_selection)
     
     kb = await manual_master_selection_kb(order.id)
+    
+    # НОВОЕ: Более информативное сообщение
+    status_text = "🆕 Новая заявка" if order.status == OrderStatus.new else "❌ Отклоненная заявка"
+    
     await callback.message.edit_text(
-        f"⚠️ Заявка #{order.number} не назначена.\n"
-        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n\n"
-        f"Выберите мастера:",
+        f"{status_text}\n\n"
+        f"📋 Заявка #{order.number}\n"
+        f"👤 Клиент: {order.client_name}\n"
+        f"📞 Телефон: {order.phone}\n"
+        f"📍 Адрес: {order.address}\n"
+        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
+        f"🔧 Техника: {order.type} {order.brand} {order.model}\n"
+        f"💬 Проблема: {order.comment}\n\n"
+        f"Выберите мастера для назначения:",
         reply_markup=kb
     )
     await callback.answer()
@@ -711,7 +809,14 @@ async def toggle_update_master_skill(callback: CallbackQuery, state: FSMContext)
 
 
 @router.callback_query(F.data == "skills_done", AdminStates.updating_master_skills)
-async def finish_update_skills(callback: CallbackQuery, state: FSMContext):
+async def finish_update_skills(callback: CallbackQuery, state: FSMContext, master_service: MasterService):
+    data = await state.get_data()
+    master_id = data.get("master_id")
+    skill_ids = data.get("selected_skills", [])
+    
+    if master_id:
+        await master_service.update_skills(master_id, skill_ids)
+    
     await state.set_state(AdminStates.selecting_master_to_update)
     await callback.message.edit_text("✅ Навыки обновлены. Вернитесь к меню.")
     await callback.answer()
