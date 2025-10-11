@@ -8,6 +8,7 @@ from services.services import OrderService, MasterService
 from models import OrderStatus, Master
 from core.utils import get_status_emoji, format_money
 from filters.role import RoleFilter
+from config import ADMIN_IDS
 
 router = Router()
 
@@ -17,6 +18,16 @@ class MasterStates(StatesGroup):
     waiting_work_amount = State()
     waiting_expenses = State()
     waiting_admin_message = State()
+
+
+# ==================== Adminlarga xabar yuborish ====================
+async def notify_admins(bot: Bot, message: str):
+    """Barcha adminlarga xabar yuborish"""
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, message)
+        except Exception:
+            continue
 
 
 # ==================== Главное меню ====================
@@ -34,7 +45,7 @@ async def master_start(msg: Message, state: FSMContext, master: Master):
 @router.message(F.text == "📋 Мои заявки")
 async def my_orders(msg: Message, state: FSMContext, master: Master, master_service: MasterService):
     """Список заявок мастера"""
-    await state.clear()  # Ensure state is cleared for menu actions
+    await state.clear()
     orders = await master_service.get_master_orders(master.id)
     
     if not orders:
@@ -79,11 +90,23 @@ async def my_orders(msg: Message, state: FSMContext, master: Master, master_serv
 async def confirm_order(
     callback: CallbackQuery,
     master: Master,
-    order_service: OrderService
+    order_service: OrderService,
+    bot: Bot
 ):
     """Подтверждение заявки"""
     order_id = int(callback.data.split("_")[1])
     order = await order_service.update_status(order_id, OrderStatus.confirmed)
+    
+    # Adminlarga xabar
+    await notify_admins(
+        bot,
+        f"✅ Мастер принял заказ!\n\n"
+        f"👤 Мастер: {master.name}\n"
+        f"📋 Заказ: #{order.number}\n"
+        f"👥 Клиент: {order.client_name}\n"
+        f"📍 Адрес: {order.address}\n"
+        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}"
+    )
     
     await callback.message.edit_text(
         f"✅ Вы подтвердили заявку #{order.number}!\n\n"
@@ -98,11 +121,24 @@ async def confirm_order(
 @router.callback_query(F.data.startswith("depart_"))
 async def depart_order(
     callback: CallbackQuery,
-    order_service: OrderService
+    master: Master,
+    order_service: OrderService,
+    bot: Bot
 ):
     """Выезд к клиенту"""
     order_id = int(callback.data.split("_")[1])
     order = await order_service.update_status(order_id, OrderStatus.in_progress)
+    
+    # Adminlarga xabar
+    await notify_admins(
+        bot,
+        f"🚗 Мастер выехал на заказ!\n\n"
+        f"👤 Мастер: {master.name}\n"
+        f"📋 Заказ: #{order.number}\n"
+        f"👥 Клиент: {order.client_name}\n"
+        f"📍 Адрес: {order.address}\n"
+        f"📞 Телефон: {order.phone}"
+    )
     
     await callback.message.edit_text(
         f"🚗 Вы выехали на заявку #{order.number}!\n\n"
@@ -116,11 +152,23 @@ async def depart_order(
 @router.callback_query(F.data.startswith("arrive_"))
 async def arrive_order(
     callback: CallbackQuery,
-    order_service: OrderService
+    master: Master,
+    order_service: OrderService,
+    bot: Bot
 ):
     """Прибытие на место"""
     order_id = int(callback.data.split("_")[1])
     order = await order_service.update_status(order_id, OrderStatus.arrived)
+    
+    # Adminlarga xabar
+    await notify_admins(
+        bot,
+        f"🏠 Мастер прибыл на место!\n\n"
+        f"👤 Мастер: {master.name}\n"
+        f"📋 Заказ: #{order.number}\n"
+        f"👥 Клиент: {order.client_name}\n"
+        f"📍 Адрес: {order.address}"
+    )
     
     await callback.message.edit_text(
         f"🏠 Вы прибыли на заявку #{order.number}!\n\n"
@@ -171,7 +219,9 @@ async def process_work_amount(msg: Message, state: FSMContext):
 async def complete_order_finish(
     msg: Message,
     state: FSMContext,
-    order_service: OrderService
+    master: Master,
+    order_service: OrderService,
+    bot: Bot
 ):
     """Завершение заявки с расчетом"""
     try:
@@ -186,6 +236,18 @@ async def complete_order_finish(
             status=OrderStatus.completed,
             work_amount=data["work_amount"],
             expenses=expenses
+        )
+        
+        # Adminlarga xabar
+        await notify_admins(
+            bot,
+            f"✅ Заказ завершён!\n\n"
+            f"👤 Мастер: {master.name}\n"
+            f"📋 Заказ: #{order.number}\n"
+            f"👥 Клиент: {order.client_name}\n\n"
+            f"💰 Сумма работы: {format_money(order.work_amount)}\n"
+            f"💵 Расходы: {format_money(order.expenses)}\n"
+            f"💎 Прибыль: {format_money(order.profit)}"
         )
         
         await msg.answer(
@@ -205,11 +267,24 @@ async def complete_order_finish(
 @router.callback_query(F.data.startswith("reject_"))
 async def reject_order(
     callback: CallbackQuery,
-    order_service: OrderService
+    master: Master,
+    order_service: OrderService,
+    bot: Bot
 ):
     """Отказ от заявки"""
     order_id = int(callback.data.split("_")[1])
     order = await order_service.update_status(order_id, OrderStatus.rejected)
+    
+    # Adminlarga xabar
+    await notify_admins(
+        bot,
+        f"❌ Мастер отказался от заказа!\n\n"
+        f"👤 Мастер: {master.name}\n"
+        f"📋 Заказ: #{order.number}\n"
+        f"👥 Клиент: {order.client_name}\n"
+        f"📍 Адрес: {order.address}\n\n"
+        f"⚠️ Требуется переназначение заказа!"
+    )
     
     await callback.message.edit_text(
         f"❌ Вы отказались от заявки #{order.number}\n\n"
@@ -261,8 +336,6 @@ async def message_admin_start(msg: Message, state: FSMContext):
 @router.message(MasterStates.waiting_admin_message)
 async def send_message_to_admin(msg: Message, state: FSMContext, master: Master, bot: Bot):
     """Отправка сообщения админу"""
-    from config import ADMIN_IDS
-    
     admin_message = (
         f"📨 Сообщение от мастера:\n\n"
         f"👤 {master.name} (ID: {master.telegram_id})\n"
@@ -290,7 +363,6 @@ async def send_message_to_admin(msg: Message, state: FSMContext, master: Master,
         )
     
     await state.clear()
-
 
 
 @router.callback_query(F.data == "master_orders_active")
@@ -338,7 +410,6 @@ async def show_archive_orders(
     master: Master,
     master_service: MasterService
 ):
-
     orders = await master_service.get_master_orders(master.id)
     
     completed = [o for o in orders if o.status == OrderStatus.completed]
@@ -354,7 +425,7 @@ async def show_archive_orders(
     text = "✅ Завершенные заявки:\n\n"
     total_profit = 0
     
-    for order in completed[:10]:  # Последние 10
+    for order in completed[:10]:
         text += (
             f"#{order.number} - {order.client_name}\n"
             f"  Прибыль: {format_money(order.profit)}\n"
