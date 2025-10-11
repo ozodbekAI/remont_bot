@@ -297,6 +297,8 @@ async def skip_photos(msg: Message, state: FSMContext):
     )
 
 
+
+
 @router.message(MasterStates.waiting_work_photos)
 async def invalid_photo_input(msg: Message):
     """Неверный ввод при ожидании фото"""
@@ -304,6 +306,9 @@ async def invalid_photo_input(msg: Message):
         "❌ Пожалуйста, отправьте фото или нажмите 'Готово'\n"
         "Если не хотите отправлять фото, нажмите 'Пропустить'"
     )
+
+
+@router.message(MasterStates.waiting_work_description)
 async def complete_order_finish(
     msg: Message,
     state: FSMContext,
