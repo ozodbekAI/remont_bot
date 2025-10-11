@@ -17,6 +17,7 @@ router = Router()
 class MasterStates(StatesGroup):
     waiting_work_amount = State()
     waiting_expenses = State()
+    waiting_work_description = State()
     waiting_admin_message = State()
 
 
