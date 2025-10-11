@@ -122,7 +122,7 @@ async def confirm_order(
         f"📍 Адрес: {order.address}\n"
         f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
         f"💬 Проблема: {order.comment}",
-        reply_markup=order_status_kb(order.id)
+        reply_markup=order_status_kb(order.id, order.status)
     )
     await callback.answer("✅ Заявка подтверждена")
 
@@ -153,7 +153,7 @@ async def depart_order(
         f"🚗 Вы выехали на заявку #{order.number}!\n\n"
         f"📍 Адрес: {order.address}\n"
         f"📞 Телефон: {order.phone}",
-        reply_markup=order_status_kb(order.id)
+        reply_markup=order_status_kb(order.id, order.status)
     )
     await callback.answer("🚗 В пути")
 
@@ -183,7 +183,7 @@ async def arrive_order(
         f"🏠 Вы прибыли на заявку #{order.number}!\n\n"
         f"Начинайте работу.\n"
         f"После завершения нажмите 'Завершить'.",
-        reply_markup=order_status_kb(order.id)
+        reply_markup=order_status_kb(order.id, order.status)
     )
     await callback.answer("🏠 Прибыли")
 
@@ -396,7 +396,8 @@ async def reject_order(
     
     await callback.message.edit_text(
         f"❌ Вы отказались от заявки #{order.number}\n\n"
-        f"Заявка будет переназначена другому мастеру."
+        f"Заявка будет переназначена другому мастеру.",
+        reply_markup=master_main_kb()
     )
     await callback.answer("Заявка отклонена")
 

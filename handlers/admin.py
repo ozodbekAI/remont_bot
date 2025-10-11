@@ -166,16 +166,17 @@ async def toggle_order_skill(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data == "skills_done", AdminStates.waiting_skills)
-async def skills_done(callback: CallbackQuery, state: FSMContext):
-    """Завершение выбора навыков"""
+@router.callback_query(F.data == "skills_done", AdminStates.updating_master_skills)
+async def finish_update_skills(callback: CallbackQuery, state: FSMContext, master_service: MasterService):
     data = await state.get_data()
-    if not data.get("selected_skills"):
-        await callback.answer("❌ Выберите хотя бы один навык!", show_alert=True)
-        return
+    master_id = data.get("master_id")
+    skill_ids = data.get("selected_skills", [])
     
-    await state.set_state(AdminStates.waiting_type)
-    await callback.message.edit_text("🔧 Введите тип техники (например: стиральная машина, холодильник):")
+    if master_id:
+        await master_service.update_skills(master_id, skill_ids)
+    
+    await state.set_state(AdminStates.selecting_master_to_update)
+    await callback.message.edit_text("✅ Навыки обновлены. Вернитесь к меню.")
     await callback.answer()
 
 

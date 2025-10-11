@@ -5,6 +5,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import date, timedelta
+from models import OrderStatus
 
 from database.engine import get_session
 from services.services import SkillService, MasterService
@@ -216,20 +217,38 @@ def master_main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 
-def order_status_kb(order_id: int) -> InlineKeyboardMarkup:
-    """Кнопки управления статусом заявки для мастера"""
+def order_status_kb(order_id: int, status: OrderStatus) -> InlineKeyboardMarkup:
+    """Кнопки управления статусом заявки для мастера в зависимости от статуса"""
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="✅ Беру!", callback_data=f"confirm_{order_id}"),
-        InlineKeyboardButton(text="🚗 Выехал", callback_data=f"depart_{order_id}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🏠 Прибыл", callback_data=f"arrive_{order_id}"),
-        InlineKeyboardButton(text="🛠️ Завершить", callback_data=f"complete_{order_id}")
-    )
-    builder.row(
-        InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
-    )
+    
+    if status == OrderStatus.new:
+        # Показать "Беру" и "Отказ"
+        builder.row(
+            InlineKeyboardButton(text="✅ Беру!", callback_data=f"confirm_{order_id}"),
+            InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
+        )
+    elif status == OrderStatus.confirmed:
+        # Показать "Выехал" и "Отказ"
+        builder.row(
+            InlineKeyboardButton(text="🚗 Выехал", callback_data=f"depart_{order_id}"),
+            InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
+        )
+    elif status == OrderStatus.in_progress:
+        # Показать "Прибыл" и "Отказ"
+        builder.row(
+            InlineKeyboardButton(text="🏠 Прибыл", callback_data=f"arrive_{order_id}"),
+            InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
+        )
+    elif status == OrderStatus.arrived:
+        # Показать "Завершить" и "Отказ"
+        builder.row(
+            InlineKeyboardButton(text="🛠️ Завершить", callback_data=f"complete_{order_id}"),
+            InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
+        )
+    elif status == OrderStatus.completed:
+        # Нет кнопок или "Назад"
+        pass  # or builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_orders"))
+    
     return builder.as_markup()
 
 
