@@ -1,5 +1,5 @@
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputMediaPhoto
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -23,11 +23,18 @@ class MasterStates(StatesGroup):
 
 
 # ==================== Adminlarga xabar yuborish ====================
-async def notify_admins(bot: Bot, message: str):
-    """Barcha adminlarga xabar yuborish"""
+async def notify_admins(bot: Bot, message: str, photos: list = None):
+    """Barcha adminlarga xabar yuborish, shu bilan birga fotolar"""
     for admin_id in ADMIN_IDS:
         try:
+            # Avval matn yuboramiz
             await bot.send_message(admin_id, message)
+            
+            # Agar fotolar bo'lsa, media group sifatida yuboramiz
+            if photos:
+                media_group = [InputMediaPhoto(media=photo_id) for photo_id in photos]
+                await bot.send_media_group(admin_id, media_group)
+                
         except Exception:
             continue
 
@@ -324,17 +331,19 @@ async def complete_order_finish(
         return
     
     data = await state.get_data()
+    work_photos = data.get("work_photos", [])
+    
     order = await order_service.update_status(
         order_id=data["order_id"],
         status=OrderStatus.completed,
         work_amount=data["work_amount"],
         expenses=data["expenses"],
-        work_description=work_description
+        work_description=work_description,
+        work_photos=work_photos
     )
     
-    # Adminlarga xabar
-    await notify_admins(
-        bot,
+    # Adminlarga xabar va fotolar
+    admin_message = (
         f"✅ Заказ завершён!\n\n"
         f"👤 Мастер: {master.name}\n"
         f"📋 Заказ: #{order.number}\n"
@@ -343,6 +352,12 @@ async def complete_order_finish(
         f"💰 Сумма работы: {format_money(order.work_amount)}\n"
         f"💵 Расходы: {format_money(order.expenses)}\n"
         f"💎 Прибыль: {format_money(order.profit)}"
+    )
+    
+    await notify_admins(
+        bot,
+        admin_message,
+        work_photos
     )
     
     await msg.answer(

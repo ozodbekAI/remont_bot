@@ -11,7 +11,7 @@ from core.keyboards import (
     admin_main_kb, order_status_kb, filters_kb, masters_menu_kb,
     skills_checkbox_kb, master_update_selection_kb, master_delete_selection_kb,
     master_update_menu_kb, master_delete_confirm_kb, reports_menu_kb,
-    period_selection_kb
+    period_selection_kb, manual_master_selection_kb
 )
 from core.utils import validate_phone
 from services.services import (
@@ -35,6 +35,7 @@ class AdminStates(StatesGroup):
     waiting_brand = State()
     waiting_model = State()
     waiting_comment = State()
+    manual_master_selection = State()  # НОВОЕ: ручное назначение мастера
     
     # Добавление навыка
     adding_skill_name = State()
@@ -200,7 +201,7 @@ async def process_model(msg: Message, state: FSMContext):
 
 
 @router.message(AdminStates.waiting_comment)
-async def create_order(msg: Message, state: FSMContext, order_service: OrderService, bot: Bot):
+async def create_order(msg: Message, state: FSMContext, order_service: OrderService, bot: Bot, master_service: MasterService):
     """Создание заявки с назначением мастера"""
     data = await state.get_data()
     
@@ -242,14 +243,70 @@ async def create_order(msg: Message, state: FSMContext, order_service: OrderServ
                 reply_markup=order_status_kb(order.id)
             )
     else:
+        # НОВОЕ: Если не назначен автоматически, предлагаем ручное назначение
+        await state.update_data(order_id=order.id, order_number=order.number, order_datetime=order.datetime)
+        await state.set_state(AdminStates.manual_master_selection)
+        kb = await manual_master_selection_kb(order.id)
         await msg.answer(
             f"⚠️ Заявка #{order.number} создана, но нет свободного мастера!\n"
-            f"Назначьте вручную или дождитесь освобождения.\n"
-            f"(Система автоматически попробует назначить позже.)",
-            reply_markup=admin_main_kb()
+            f"Выберите мастера для ручного назначения:",
+            reply_markup=kb
         )
     
+    # await state.clear()  # Не очищаем, если переходим к manual selection
+
+
+@router.callback_query(F.data.startswith("assign_manual_"), AdminStates.manual_master_selection)
+async def manual_assign_master(callback: CallbackQuery, state: FSMContext, order_service: OrderService, master_service: MasterService, bot: Bot):
+    """Ручное назначение мастера"""
+    parts = callback.data.split("_")
+    master_id = int(parts[2])
+    order_id = int(parts[3])
+    
+    master = await master_service.master_repo.get(master_id)
+    if not master:
+        await callback.answer("❌ Мастер не найден!")
+        return
+    
+    # Назначаем
+    await order_service.assignment_repo.create(order_id=order_id, master_id=master_id)
+    order = await order_service.order_repo.get(order_id)
+    order.status = OrderStatus.confirmed
+    await master_service.update_schedule(master_id, order.datetime, "busy")
+    await order_service.session.commit()
+    
+    data = await state.get_data()
+    await callback.message.edit_text(
+        f"✅ Мастер {master.name} назначен на заявку #{data['order_number']}!\n"
+        f"📅 Время: {data['order_datetime'].strftime('%d.%m.%Y %H:%M')}"
+    )
+    
+    # Уведомление мастеру
+    await bot.send_message(
+        master.telegram_id,
+        f"🆕 Новая заявка #{order.number}!\n\n"
+        f"👤 Клиент: {order.client_name}\n"
+        f"📞 Телефон: {order.phone}\n"
+        f"📍 Адрес: {order.address}\n"
+        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
+        f"🔧 Техника: {order.type} {order.brand} {order.model}\n"
+        f"💬 Проблема: {order.comment}",
+        reply_markup=order_status_kb(order_id)
+    )
+    
+    await callback.message.answer("Выберите действие:", reply_markup=admin_main_kb())
     await state.clear()
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cancel_manual_"))
+async def cancel_manual_assignment(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.answer(
+        "⚠️ Заявка создана без мастера. Система попробует назначить позже.",
+        reply_markup=admin_main_kb()
+    )
+    await callback.answer()
 
 
 # ==================== Список заявок ====================
@@ -288,14 +345,80 @@ async def filter_orders(callback: CallbackQuery, order_service: OrderService):
         return
     
     text = f"📋 Заявки ({filter_type}):\n\n"
+    builder = InlineKeyboardBuilder()
     for order in orders[:10]:
+        # НОВОЕ: Полная информация о заявке
+        assignment = await order_service.assignment_repo.get_by_order(order.id)
+        assigned_master = assignment.master.name if assignment and assignment.master else "Не назначен"
+        
         text += (
             f"#{order.number} - {order.client_name}\n"
+            f"🔧 Тип: {order.type} {order.brand} {order.model}\n"
+            f"👤 Мастер: {assigned_master}\n"
             f"Статус: {order.status.value}\n"
-            f"Время: {order.datetime.strftime('%H:%M')}\n\n"
+            f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📍 Адрес: {order.address}\n"
+            f"💬 Проблема: {order.comment[:50]}{'...' if len(order.comment) > 50 else ''}\n\n"
         )
+        
+        # Добавляем кнопку назначения, если не назначен и статус new
+        if assigned_master == "Не назначен" and order.status == OrderStatus.new:
+            builder.row(
+                InlineKeyboardButton(
+                    text=f"👤 Назначить #{order.number}",
+                    callback_data=f"assign_order_{order.id}"
+                )
+            )
     
-    await callback.message.edit_text(text, reply_markup=filters_kb())
+    # Добавляем кнопки фильтров
+    builder.row(
+        InlineKeyboardButton(text="Все", callback_data="filter_all"),
+        InlineKeyboardButton(text="Новые", callback_data="filter_new")
+    )
+    builder.row(
+        InlineKeyboardButton(text="В работе", callback_data="filter_work"),
+        InlineKeyboardButton(text="Завершённые", callback_data="filter_done")
+    )
+    
+    markup = builder.as_markup()
+    
+    await callback.message.edit_text(text, reply_markup=markup)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("assign_order_"))
+async def start_assign_existing_order(callback: CallbackQuery, state: FSMContext, order_service: OrderService):
+    """Начало ручного назначения для существующей незанятой заявки"""
+    order_id = int(callback.data.split("_")[2])
+    order = await order_service.order_repo.get(order_id)
+    if not order:
+        await callback.answer("❌ Заявка не найдена!")
+        return
+    
+    if order.status != OrderStatus.new:
+        await callback.answer("❌ Можно назначать только новые заявки!")
+        return
+    
+    # Проверяем, назначен ли уже
+    assignment = await order_service.assignment_repo.get_by_order(order_id)
+    if assignment:
+        await callback.answer("❌ Заявка уже назначена!")
+        return
+    
+    await state.update_data(
+        order_id=order.id,
+        order_number=order.number,
+        order_datetime=order.datetime
+    )
+    await state.set_state(AdminStates.manual_master_selection)
+    
+    kb = await manual_master_selection_kb(order.id)
+    await callback.message.edit_text(
+        f"⚠️ Заявка #{order.number} не назначена.\n"
+        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"Выберите мастера:",
+        reply_markup=kb
+    )
     await callback.answer()
 
 
@@ -717,51 +840,6 @@ async def start_orders_report(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("export_"))
-async def export_report(callback: CallbackQuery, state: FSMContext, report_service: ReportService, bot: Bot):
-    """Экспорт полного отчета в Excel"""
-    data_parts = callback.data.split("_")
-    report_type = data_parts[1]
-    period = "_".join(data_parts[2:])
-
-    state_data = await state.get_data()
-    date_from = state_data.get("date_from")
-    date_to = state_data.get("date_to")
-
-    try:
-        if report_type == "financial":
-            df = await report_service.get_financial_export_data(date_from, date_to)
-            sheet_name = "Финансовый отчет"
-        elif report_type == "masters":
-            df = await report_service.get_masters_export_data(date_from, date_to)
-            sheet_name = "Отчет по мастерам"
-        elif report_type == "orders":
-            df = await report_service.get_orders_export_data(date_from, date_to)
-            sheet_name = "Отчет по заказам"
-        else:
-            await callback.answer("❌ Неизвестный тип отчета!", show_alert=True)
-            return
-
-        # Генерация Excel
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
-        output.seek(0)
-
-        filename = f"{report_type}_{period}_full.xlsx"
-        document = BufferedInputFile(file=output.getvalue(), filename=filename)
-        
-        await bot.send_document(
-            callback.from_user.id,
-            document,
-            caption=f"📤 Полный экспорт отчета: {report_type} ({period})"
-        )
-        await callback.answer("✅ Полный отчет экспортирован в Excel!")
-        
-    except Exception as e:
-        await callback.answer(f"❌ Ошибка экспорта: {str(e)}", show_alert=True)
-
 @router.callback_query(F.data == "export_all")
 async def export_all_data(callback: CallbackQuery, state: FSMContext, report_service: ReportService, bot: Bot):
     """Экспорт всех данных в Excel"""
@@ -799,7 +877,8 @@ async def export_all_data(callback: CallbackQuery, state: FSMContext, report_ser
     except Exception as e:
         await callback.message.edit_text(f"❌ Ошибка при экспорте: {str(e)}")
         await callback.answer(f"❌ Ошибка: {str(e)}", show_alert=True)
-        
+
+
 @router.callback_query(F.data.startswith("period_"), AdminStates.selecting_period)
 async def select_period(callback: CallbackQuery, state: FSMContext, report_service: ReportService):
     """Выбор периода и генерация отчета"""
@@ -937,6 +1016,9 @@ async def export_report(callback: CallbackQuery, state: FSMContext, report_servi
     elif report_type == "orders":
         df = await report_service.get_orders_export_data(date_from, date_to)
         sheet_name = "Отчет по заказам"
+    else:
+        await callback.answer("❌ Неизвестный тип отчета!", show_alert=True)
+        return
 
     # Генерация Excel с pandas
     output = io.BytesIO()

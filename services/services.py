@@ -104,13 +104,13 @@ class OrderService:
         
         if status == OrderStatus.completed:
             if work_amount is not None:
-                order.work_amount = work_amount
+                setattr(order, 'work_amount', work_amount)
             if expenses is not None:
-                order.expenses = expenses
+                setattr(order, 'expenses', expenses)
             if work_description is not None:
-                order.work_description = work_description
+                setattr(order, 'work_description', work_description)
             if work_photos is not None:
-                order.work_photos = work_photos
+                setattr(order, 'work_photos', work_photos)
             
             order.calculate_profit()
             
@@ -252,6 +252,10 @@ class MasterService:
         )
         return result.scalars().all()
 
+    async def update_schedule(self, master_id: int, dt: datetime, status: str):
+        """Update master's schedule"""
+        await self.master_repo.update_schedule(master_id, dt, status)
+
 
 class SkillService:
     def __init__(self, session: AsyncSession):
@@ -286,9 +290,9 @@ class ReportService:
             OrderStatus.completed
         )
         
-        total_profit = sum(o.profit for o in orders)
-        total_revenue = sum(o.work_amount for o in orders)
-        total_expenses = sum(o.expenses for o in orders)
+        total_profit = sum(getattr(o, 'profit', 0) for o in orders)
+        total_revenue = sum(getattr(o, 'work_amount', 0) for o in orders)
+        total_expenses = sum(getattr(o, 'expenses', 0) for o in orders)
         
         return {
             "orders_count": len(orders),
@@ -304,9 +308,9 @@ class ReportService:
             orders = await self.order_repo.get_by_status(OrderStatus.completed)
         else:
             orders = await self.order_repo.get_by_date_range(date_from, date_to, OrderStatus.completed)
-        total_profit = sum(o.profit for o in orders)
-        total_revenue = sum(o.work_amount for o in orders)
-        total_expenses = sum(o.expenses for o in orders)
+        total_profit = sum(getattr(o, 'profit', 0) for o in orders)
+        total_revenue = sum(getattr(o, 'work_amount', 0) for o in orders)
+        total_expenses = sum(getattr(o, 'expenses', 0) for o in orders)
         return {
             "orders_count": len(orders),
             "total_profit": total_profit,
@@ -328,7 +332,7 @@ class ReportService:
                 if master_name not in stats:
                     stats[master_name] = {"orders_count": 0, "total_profit": 0.0}
                 stats[master_name]["orders_count"] += 1
-                stats[master_name]["total_profit"] += assignment.order.profit
+                stats[master_name]["total_profit"] += getattr(assignment.order, 'profit', 0)
         return stats
 
     async def get_orders_report(self, date_from: Optional[date] = None, date_to: Optional[date] = None) -> List[Order]:
@@ -347,11 +351,11 @@ class ReportService:
                 "Номер": order.number,
                 "Дата": order.datetime.strftime("%Y-%m-%d"),
                 "Клиент": order.client_name,
-                "Выручка": order.work_amount,
-                "Расходы": order.expenses,
-                "Прибыль": order.profit,
-                "Описание работ": order.work_description or "Не указано",
-                "Фото": len(order.work_photos) if order.work_photos else 0
+                "Выручка": getattr(order, 'work_amount', 0),
+                "Расходы": getattr(order, 'expenses', 0),
+                "Прибыль": getattr(order, 'profit', 0),
+                "Описание работ": getattr(order, 'work_description', None) or "Не указано",
+                "Фото": len(getattr(order, 'work_photos', None) or [])
             })
         df = pd.DataFrame(data)
         if not df.empty:
@@ -382,9 +386,9 @@ class ReportService:
                 "Номер": o.number,
                 "Дата": o.datetime.strftime("%Y-%m-%d"),
                 "Клиент": o.client_name,
-                "Прибыль": o.profit,
-                "Описание": o.work_description or "Не указано",
-                "Фото": len(o.work_photos) if o.work_photos else 0
+                "Прибыль": getattr(o, 'profit', 0),
+                "Описание": getattr(o, 'work_description', None) or "Не указано",
+                "Фото": len(getattr(o, 'work_photos', None) or [])
             })
         df = pd.DataFrame(data)
         if not df.empty:
@@ -405,11 +409,11 @@ class ReportService:
                 "Тип": order.type,
                 "Бренд": order.brand,
                 "Модель": order.model,
-                "Выручка": order.work_amount or 0,
-                "Расходы": order.expenses or 0,
-                "Прибыль": order.profit or 0,
-                "Описание работ": order.work_description or "Не указано",
-                "Кол-во фото": len(order.work_photos) if order.work_photos else 0
+                "Выручка": getattr(order, 'work_amount', 0),
+                "Расходы": getattr(order, 'expenses', 0),
+                "Прибыль": getattr(order, 'profit', 0),
+                "Описание работ": getattr(order, 'work_description', None) or "Не указано",
+                "Кол-во фото": len(getattr(order, 'work_photos', None) or [])
             })
         orders_df = pd.DataFrame(orders_data)
         if not orders_df.empty:
@@ -426,9 +430,9 @@ class ReportService:
         master_stats = {}
         for master in masters:
             assignments = await self.assignment_repo.get_by_master(master.id)
-            total_profit = sum(a.order.profit or 0 for a in assignments if a.order and a.order.status == OrderStatus.completed)
-            total_expenses = sum(a.order.expenses or 0 for a in assignments if a.order and a.order.status == OrderStatus.completed)
-            total_revenue = sum(a.order.work_amount or 0 for a in assignments if a.order and a.order.status == OrderStatus.completed)
+            total_profit = sum(getattr(a.order, 'profit', 0) for a in assignments if a.order and a.order.status == OrderStatus.completed)
+            total_expenses = sum(getattr(a.order, 'expenses', 0) for a in assignments if a.order and a.order.status == OrderStatus.completed)
+            total_revenue = sum(getattr(a.order, 'work_amount', 0) for a in assignments if a.order and a.order.status == OrderStatus.completed)
             orders_count = len([a for a in assignments if a.order and a.order.status == OrderStatus.completed])
             
             master_stats[master.name] = {

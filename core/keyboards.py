@@ -152,6 +152,30 @@ def master_delete_confirm_kb(master_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+async def manual_master_selection_kb(order_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура для ручного выбора мастера (НОВОЕ)"""
+    builder = InlineKeyboardBuilder()
+    
+    async with get_session() as session:
+        from services.services import MasterService
+        master_service = MasterService(session)
+        masters = await master_service.get_all_with_skills()
+    
+    if not masters:
+        return InlineKeyboardMarkup(inline_keyboard=[])
+    
+    for master in masters:
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{master.name} (ID: {master.telegram_id})",
+                callback_data=f"assign_manual_{master.id}_{order_id}"
+            )
+        )
+    
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_manual_{order_id}"))
+    return builder.as_markup()
+
+
 # ==================== REPORTS KEYBOARDS ====================
 def reports_menu_kb() -> InlineKeyboardMarkup:
     """Главное меню отчетов"""
