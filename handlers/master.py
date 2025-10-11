@@ -1,5 +1,5 @@
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
@@ -17,6 +17,7 @@ router = Router()
 class MasterStates(StatesGroup):
     waiting_work_amount = State()
     waiting_expenses = State()
+    waiting_work_photos = State()
     waiting_work_description = State()
     waiting_admin_message = State()
 
@@ -217,6 +218,92 @@ async def process_work_amount(msg: Message, state: FSMContext):
 
 
 @router.message(MasterStates.waiting_expenses)
+async def process_expenses(msg: Message, state: FSMContext):
+    """Обработка расходов"""
+    try:
+        expenses = float(msg.text.strip())
+        if expenses < 0:
+            await msg.answer("❌ Расходы не могут быть отрицательными. Попробуйте снова:")
+            return
+        
+        await state.update_data(expenses=expenses, work_photos=[])
+        await state.set_state(MasterStates.waiting_work_photos)
+        await msg.answer(
+            "📸 Отправьте фото выполненных работ:\n"
+            "Можете отправить несколько фото.\n\n"
+            "Когда закончите, нажмите кнопку 'Готово' или отправьте /done",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="✅ Готово")]],
+                resize_keyboard=True
+            )
+        )
+    except ValueError:
+        await msg.answer("❌ Неверный формат. Введите число, например: 50000")
+
+
+@router.message(MasterStates.waiting_work_photos, F.photo)
+async def receive_work_photo(msg: Message, state: FSMContext):
+    """Получение фото работ"""
+    data = await state.get_data()
+    photos = data.get("work_photos", [])
+    
+    # Сохраняем file_id самого большого фото
+    photos.append(msg.photo[-1].file_id)
+    await state.update_data(work_photos=photos)
+    
+    await msg.answer(
+        f"✅ Фото получено! Всего: {len(photos)}\n"
+        f"Отправьте еще фото или нажмите 'Готово'"
+    )
+
+
+@router.message(MasterStates.waiting_work_photos, F.text.in_(["✅ Готово", "/done"]))
+async def photos_done(msg: Message, state: FSMContext):
+    """Завершение приема фото"""
+    data = await state.get_data()
+    photos = data.get("work_photos", [])
+    
+    if not photos:
+        await msg.answer(
+            "⚠️ Вы не отправили ни одного фото.\n"
+            "Отправьте хотя бы одно фото или нажмите 'Пропустить'",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[
+                    [KeyboardButton(text="⏭️ Пропустить")],
+                    [KeyboardButton(text="✅ Готово")]
+                ],
+                resize_keyboard=True
+            )
+        )
+        return
+    
+    await state.set_state(MasterStates.waiting_work_description)
+    await msg.answer(
+        "📝 Опишите выполненные работы:\n"
+        "Например: Замена компрессора, заправка фреоном, проверка системы",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+@router.message(MasterStates.waiting_work_photos, F.text == "⏭️ Пропустить")
+async def skip_photos(msg: Message, state: FSMContext):
+    """Пропустить фото"""
+    await state.update_data(work_photos=[])
+    await state.set_state(MasterStates.waiting_work_description)
+    await msg.answer(
+        "📝 Опишите выполненные работы:\n"
+        "Например: Замена компрессора, заправка фреоном, проверка системы",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+@router.message(MasterStates.waiting_work_photos)
+async def invalid_photo_input(msg: Message):
+    """Неверный ввод при ожидании фото"""
+    await msg.answer(
+        "❌ Пожалуйста, отправьте фото или нажмите 'Готово'\n"
+        "Если не хотите отправлять фото, нажмите 'Пропустить'"
+    )
 async def complete_order_finish(
     msg: Message,
     state: FSMContext,
@@ -225,44 +312,44 @@ async def complete_order_finish(
     bot: Bot
 ):
     """Завершение заявки с расчетом"""
-    try:
-        expenses = float(msg.text.strip())
-        if expenses < 0:
-            await msg.answer("❌ Расходы не могут быть отрицательными. Попробуйте снова:")
-            return
-        
-        data = await state.get_data()
-        order = await order_service.update_status(
-            order_id=data["order_id"],
-            status=OrderStatus.completed,
-            work_amount=data["work_amount"],
-            expenses=expenses
-        )
-        
-        # Adminlarga xabar
-        await notify_admins(
-            bot,
-            f"✅ Заказ завершён!\n\n"
-            f"👤 Мастер: {master.name}\n"
-            f"📋 Заказ: #{order.number}\n"
-            f"👥 Клиент: {order.client_name}\n\n"
-            f"💰 Сумма работы: {format_money(order.work_amount)}\n"
-            f"💵 Расходы: {format_money(order.expenses)}\n"
-            f"💎 Прибыль: {format_money(order.profit)}"
-        )
-        
-        await msg.answer(
-            f"✅ Заявка #{order.number} завершена!\n\n"
-            f"💰 Сумма работы: {format_money(order.work_amount)}\n"
-            f"💵 Расходы: {format_money(order.expenses)}\n"
-            f"💎 Прибыль: {format_money(order.profit)}\n\n"
-            f"Отличная работа! 👏",
-            reply_markup=master_main_kb()
-        )
-        await state.clear()
-        
-    except ValueError:
-        await msg.answer("❌ Неверный формат. Введите число, например: 50000")
+    work_description = msg.text.strip()
+    
+    if len(work_description) < 5:
+        await msg.answer("❌ Описание слишком короткое. Опишите подробнее выполненные работы:")
+        return
+    
+    data = await state.get_data()
+    order = await order_service.update_status(
+        order_id=data["order_id"],
+        status=OrderStatus.completed,
+        work_amount=data["work_amount"],
+        expenses=data["expenses"],
+        work_description=work_description
+    )
+    
+    # Adminlarga xabar
+    await notify_admins(
+        bot,
+        f"✅ Заказ завершён!\n\n"
+        f"👤 Мастер: {master.name}\n"
+        f"📋 Заказ: #{order.number}\n"
+        f"👥 Клиент: {order.client_name}\n\n"
+        f"📝 Выполненные работы:\n{work_description}\n\n"
+        f"💰 Сумма работы: {format_money(order.work_amount)}\n"
+        f"💵 Расходы: {format_money(order.expenses)}\n"
+        f"💎 Прибыль: {format_money(order.profit)}"
+    )
+    
+    await msg.answer(
+        f"✅ Заявка #{order.number} завершена!\n\n"
+        f"📝 Работы: {work_description}\n\n"
+        f"💰 Сумма работы: {format_money(order.work_amount)}\n"
+        f"💵 Расходы: {format_money(order.expenses)}\n"
+        f"💎 Прибыль: {format_money(order.profit)}\n\n"
+        f"Отличная работа! 👏",
+        reply_markup=master_main_kb()
+    )
+    await state.clear()
 
 
 @router.callback_query(F.data.startswith("reject_"))

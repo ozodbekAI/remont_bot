@@ -50,8 +50,8 @@ def calculate_profit(work_amount: float, expenses: float) -> float:
 
 
 def format_money(amount: float, currency: str = "₽") -> str:
-    """Pul summasi formatlash"""
-    return f"{amount:,.2f} {currency}".replace(",", " ")
+    """Pul summasi formatlash (butun son sifatida)"""
+    return f"{amount:,} {currency}".replace(",", " ")
 
 
 def parse_datetime_str(dt_str: str) -> Optional[str]:
