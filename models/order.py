@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Float, Enum as SQLEnum, select
+from sqlalchemy import Column, String, DateTime, Float, Enum as SQLEnum, Text, JSON
 from sqlalchemy.orm import relationship
 from enum import Enum as PyEnum
 from models.base import BaseModel
@@ -9,6 +9,7 @@ class OrderStatus(PyEnum):
     in_progress = "in_progress"
     arrived = "arrived"
     completed = "completed"
+    rejected = "rejected"
 
 class Order(BaseModel):
     __tablename__ = "orders"
@@ -23,16 +24,19 @@ class Order(BaseModel):
     model = Column(String)
     comment = Column(String)
     status = Column(SQLEnum(OrderStatus), default=OrderStatus.new)
+    
+    # Финансы
     work_amount = Column(Float, default=0.0)
     expenses = Column(Float, default=0.0)
     profit = Column(Float, default=0.0)
     
+    # Описание работ и фото
+    work_description = Column(Text, nullable=True)
+    work_photos = Column(JSON, nullable=True)  # List[str] - file_ids
+    
     assignments = relationship("Assignment", back_populates="order")
+    required_skills = relationship("Skill", secondary="order_skills", back_populates="orders")
     
-    @classmethod
-    async def filter_by_status(cls, status, session):
-        return await session.execute(select(cls).where(cls.status == status))
-    
-    async def update_profit(self, session):
-        self.profit = self.work_amount - self.expenses
-        await self.save(session)
+    def calculate_profit(self):
+        """Рассчитать прибыль"""
+        self.profit = (self.work_amount or 0) - (self.expenses or 0)

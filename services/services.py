@@ -61,11 +61,6 @@ class OrderService:
         assigned_master = await self.assign_to_master(order.id)
         assigned = assigned_master is not None
         
-        if assigned:
-            pass
-        else:
-            pass
-        
         return order, assigned
     
     async def assign_to_master(self, order_id: int) -> Optional[Master]:
@@ -99,8 +94,11 @@ class OrderService:
         order_id: int, 
         status: OrderStatus,
         work_amount: float = None,
-        expenses: float = None
+        expenses: float = None,
+        work_description: str = None,
+        work_photos: List[str] = None
     ) -> Order:
+        """Обновить статус заказа с дополнительными данными"""
         order = await self.order_repo.get(order_id)
         order.status = status
         
@@ -109,7 +107,13 @@ class OrderService:
                 order.work_amount = work_amount
             if expenses is not None:
                 order.expenses = expenses
-            order.calculate_profit() 
+            if work_description is not None:
+                order.work_description = work_description
+            if work_photos is not None:
+                order.work_photos = work_photos
+            
+            order.calculate_profit()
+            
             assignment = await self.assignment_repo.get_by_order(order_id)
             if assignment:
                 await self.master_repo.update_schedule(
@@ -119,6 +123,8 @@ class OrderService:
                 )
         
         await self.session.flush()
+        await self.session.commit()
+        await self.session.refresh(order)
         return order
     
     async def get_orders_by_filter(
@@ -343,11 +349,19 @@ class ReportService:
                 "Клиент": order.client_name,
                 "Выручка": order.work_amount,
                 "Расходы": order.expenses,
-                "Прибыль": order.profit
+                "Прибыль": order.profit,
+                "Описание работ": order.work_description or "Не указано",
+                "Фото": len(order.work_photos) if order.work_photos else 0
             })
         df = pd.DataFrame(data)
         if not df.empty:
-            df.loc[len(df)] = ["Итого", "", "", df["Выручка"].sum(), df["Расходы"].sum(), df["Прибыль"].sum()]
+            df.loc[len(df)] = [
+                "Итого", "", "", 
+                df["Выручка"].sum(), 
+                df["Расходы"].sum(), 
+                df["Прибыль"].sum(),
+                "", ""
+            ]
         return df
 
     async def get_masters_export_data(self, date_from: Optional[date] = None, date_to: Optional[date] = None) -> pd.DataFrame:
@@ -362,10 +376,19 @@ class ReportService:
     async def get_orders_export_data(self, date_from: Optional[date] = None, date_to: Optional[date] = None) -> pd.DataFrame:
         """Полные данные для экспорта по заказам"""
         orders = await self.get_orders_report(date_from, date_to)
-        data = [{"Номер": o.number, "Дата": o.datetime.strftime("%Y-%m-%d"), "Клиент": o.client_name, "Прибыль": o.profit} for o in orders]
+        data = []
+        for o in orders:
+            data.append({
+                "Номер": o.number,
+                "Дата": o.datetime.strftime("%Y-%m-%d"),
+                "Клиент": o.client_name,
+                "Прибыль": o.profit,
+                "Описание": o.work_description or "Не указано",
+                "Фото": len(o.work_photos) if o.work_photos else 0
+            })
         df = pd.DataFrame(data)
         if not df.empty:
-            df.loc[len(df)] = ["Итого", "", "", df["Прибыль"].sum()]
+            df.loc[len(df)] = ["Итого", "", "", df["Прибыль"].sum(), "", ""]
         return df
 
     async def get_all_export_data(self) -> Dict[str, pd.DataFrame]:
@@ -384,7 +407,9 @@ class ReportService:
                 "Модель": order.model,
                 "Выручка": order.work_amount or 0,
                 "Расходы": order.expenses or 0,
-                "Прибыль": order.profit or 0
+                "Прибыль": order.profit or 0,
+                "Описание работ": order.work_description or "Не указано",
+                "Кол-во фото": len(order.work_photos) if order.work_photos else 0
             })
         orders_df = pd.DataFrame(orders_data)
         if not orders_df.empty:
@@ -392,7 +417,8 @@ class ReportService:
                 "Итого", "", "", "", "", "", "", 
                 orders_df["Выручка"].sum(), 
                 orders_df["Расходы"].sum(), 
-                orders_df["Прибыль"].sum()
+                orders_df["Прибыль"].sum(),
+                "", ""
             ]
 
         # Мастера с навыками и итоговыми расчетами (прибыль/расходы по всем заказам)

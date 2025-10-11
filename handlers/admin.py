@@ -717,33 +717,89 @@ async def start_orders_report(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+@router.callback_query(F.data.startswith("export_"))
+async def export_report(callback: CallbackQuery, state: FSMContext, report_service: ReportService, bot: Bot):
+    """Экспорт полного отчета в Excel"""
+    data_parts = callback.data.split("_")
+    report_type = data_parts[1]
+    period = "_".join(data_parts[2:])
+
+    state_data = await state.get_data()
+    date_from = state_data.get("date_from")
+    date_to = state_data.get("date_to")
+
+    try:
+        if report_type == "financial":
+            df = await report_service.get_financial_export_data(date_from, date_to)
+            sheet_name = "Финансовый отчет"
+        elif report_type == "masters":
+            df = await report_service.get_masters_export_data(date_from, date_to)
+            sheet_name = "Отчет по мастерам"
+        elif report_type == "orders":
+            df = await report_service.get_orders_export_data(date_from, date_to)
+            sheet_name = "Отчет по заказам"
+        else:
+            await callback.answer("❌ Неизвестный тип отчета!", show_alert=True)
+            return
+
+        # Генерация Excel
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        
+        output.seek(0)
+
+        filename = f"{report_type}_{period}_full.xlsx"
+        document = BufferedInputFile(file=output.getvalue(), filename=filename)
+        
+        await bot.send_document(
+            callback.from_user.id,
+            document,
+            caption=f"📤 Полный экспорт отчета: {report_type} ({period})"
+        )
+        await callback.answer("✅ Полный отчет экспортирован в Excel!")
+        
+    except Exception as e:
+        await callback.answer(f"❌ Ошибка экспорта: {str(e)}", show_alert=True)
+
 @router.callback_query(F.data == "export_all")
 async def export_all_data(callback: CallbackQuery, state: FSMContext, report_service: ReportService, bot: Bot):
-    """Экспорт всех данных в Excel (заказы со статусами + мастера с навыками и расчетами)"""
+    """Экспорт всех данных в Excel"""
     await state.clear()
+    
+    try:
+        await callback.message.edit_text("⏳ Генерация отчета... Пожалуйста, подождите.")
+        
+        # Получаем все данные
+        export_data = await report_service.get_all_export_data()
 
-    # Получаем все данные
-    export_data = await report_service.get_all_export_data()
+        # Генерация Excel с несколькими листами
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            for sheet_name, df in export_data.items():
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
 
-    # Генерация Excel с несколькими листами
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        for sheet_name, df in export_data.items():
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+        output.seek(0)
 
-    output.seek(0)
-
-    filename = "all_data_export.xlsx"
-    document = BufferedInputFile(file=output.getvalue(), filename=filename)
-    await bot.send_document(
-        callback.from_user.id,
-        document,
-        caption="📤 Полный экспорт всех данных: заказы (со статусами, прибыль/расходы) + мастера (с навыками, итоговыми расчетами)"
-    )
-    await callback.message.edit_text("✅ Все данные экспортированы в Excel!")
-    await callback.answer("✅ Экспорт завершен!")
-
-
+        filename = f"all_data_export_{date.today().strftime('%Y%m%d')}.xlsx"
+        document = BufferedInputFile(file=output.getvalue(), filename=filename)
+        
+        await bot.send_document(
+            callback.from_user.id,
+            document,
+            caption=(
+                "📤 Полный экспорт всех данных:\n\n"
+                "📋 Заказы - все заказы со статусами, описанием работ и фото\n"
+                "👥 Мастера - мастера с навыками и итоговыми расчетами"
+            )
+        )
+        await callback.message.edit_text("✅ Все данные экспортированы в Excel!")
+        await callback.answer("✅ Экспорт завершен!")
+        
+    except Exception as e:
+        await callback.message.edit_text(f"❌ Ошибка при экспорте: {str(e)}")
+        await callback.answer(f"❌ Ошибка: {str(e)}", show_alert=True)
+        
 @router.callback_query(F.data.startswith("period_"), AdminStates.selecting_period)
 async def select_period(callback: CallbackQuery, state: FSMContext, report_service: ReportService):
     """Выбор периода и генерация отчета"""
