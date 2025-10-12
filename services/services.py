@@ -290,30 +290,49 @@ class MasterService:
     
     async def is_available_with_buffer(self, master_id: int, dt: datetime) -> bool:
         """
-        Проверяет доступность мастера с учетом буфера в 5 часов
+        Проверяет доступность мастера с учетом буфера в 4 часа
+        Мастер считается недоступным если у него есть заказ в пределах ±4 часа
         """
-        if not await self.master_repo.is_free_at(master_id, dt):
-            return False
-        
+        # Получаем мастера
         master = await self.master_repo.get(master_id)
         if not master:
             return False
         
-        busy_dts = []
-        for date_str, times in master.schedule.items():
-            for time_str in times:
-                busy_dt_str = f"{date_str} {time_str}"
+        # Проверяем базовую доступность (точное время)
+        date_str = dt.strftime("%Y-%m-%d")
+        time_str = dt.strftime("%H:%M")
+        
+        if master.schedule and date_str in master.schedule:
+            if time_str in master.schedule[date_str]:
+                return False  # Уже занят в это точное время
+        
+        # Если расписание пустое - мастер свободен
+        if not master.schedule:
+            return True
+        
+        # Собираем все занятые временные слоты мастера
+        busy_datetimes = []
+        for schedule_date_str, times in master.schedule.items():
+            for schedule_time_str in times:
+                busy_dt_str = f"{schedule_date_str} {schedule_time_str}"
                 try:
                     busy_dt = datetime.strptime(busy_dt_str, "%Y-%m-%d %H:%M")
-                    busy_dts.append(busy_dt)
+                    busy_datetimes.append(busy_dt)
                 except ValueError:
+                    # Игнорируем некорректные форматы
                     continue
         
-        for busy_dt in busy_dts:
-            if abs(busy_dt - dt) < timedelta(hours=5):
+        # Проверяем: есть ли занятые слоты в пределах ±4 часов от нового времени
+        buffer = timedelta(hours=4)
+        for busy_dt in busy_datetimes:
+            time_difference = abs(dt - busy_dt)
+            if time_difference < buffer:
+                # Нашли конфликт - мастер занят в пределах 4 часов
                 return False
         
+        # Все проверки пройдены - мастер доступен
         return True
+
 class SkillService:
     def __init__(self, session: AsyncSession):
         self.session = session
