@@ -66,44 +66,37 @@ class OrderService:
     async def assign_to_master(self, order_id: int) -> Optional[Master]:
         """Назначить мастера БЕЗ автоматического подтверждения"""
         
-        # ВАЖНО: Проверяем что заказ еще не назначен
         existing_assignment = await self.assignment_repo.get_by_order(order_id)
         if existing_assignment:
-            return None  # Уже назначен
+            return None
         
         order = await self.order_repo.get_with_skills(order_id)
         if not order or not order.required_skills:
             return None
         
         skill_ids = [s.id for s in order.required_skills]
-        masters = await self.master_repo.get_by_skills(skill_ids)
+        # YANGI: Универсал навыкли мастерларни хам олади
+        masters = await self.master_repo.get_by_skills_or_universal(skill_ids)
         
-        # Проверяем каждого мастера с учетом 4-часового буфера
+        # Остальной код без изменений...
         suitable_masters = []
         for master in masters:
-            # Проверяем базовую доступность (точное время)
             if not await self.master_repo.is_free_at(master.id, order.datetime):
                 continue
             
-            # Проверяем 4-часовой буфер
             if await self._check_buffer_availability(master, order.datetime):
                 suitable_masters.append(master)
         
         if not suitable_masters:
             return None
         
-        # Выбираем случайного мастера из подходящих
         import random
         selected_master = random.choice(suitable_masters)
         
-        # Создаем назначение
         await self.assignment_repo.create(
             order_id=order.id,
             master_id=selected_master.id
         )
-        
-        # ВАЖНО: Статус остается "new", не меняем на "confirmed"!
-        # НЕ резервируем время сразу! Только после подтверждения мастером
         
         await self.session.flush()
         await self.session.commit()
@@ -301,40 +294,27 @@ class MasterService:
         )
         return result.scalars().all()
     async def update_schedule(self, master_id: int, dt: datetime, status: str):
-        """Update master's schedule"""
-        await self.master_repo.update_schedule(master_id, dt, status)
-   
-    # НОВЫЙ МЕТОД: Поиск доступного мастера
+            """Update master's schedule"""
+            await self.master_repo.update_schedule(master_id, dt, status)
+    
+        # НОВЫЙ МЕТОД: Поиск доступного мастера
     async def find_available_master(
         self,
         datetime: datetime,
         skill_ids: List[int],
         exclude_master_id: Optional[int] = None
     ) -> Optional[Master]:
-        """
-        Найти свободного мастера с нужными навыками на указанное время
-        
-        Args:
-            datetime: Время заказа
-            skill_ids: Список ID необходимых навыков
-            exclude_master_id: ID мастера, которого нужно исключить (например, отказавшегося)
-            
-        Returns:
-            Master объект или None если не найден
-        """
         if not skill_ids:
             return None
         
-        # Получаем всех мастеров с нужными навыками
-        masters = await self.master_repo.get_by_skills(skill_ids)
+        # YANGI: Получаем всех мастеров с нужными навыками ИЛИ с "Универсал"
+        masters = await self.master_repo.get_by_skills_or_universal(skill_ids)
         
         suitable = []
         for master in masters:
-            # Пропускаем исключенного мастера (того кто отказался)
             if exclude_master_id and master.id == exclude_master_id:
                 continue
             
-            # ИСПРАВЛЕНО: вызываем метод из текущего класса (self)
             if await self.is_available_with_buffer(master.id, datetime):
                 suitable.append(master)
         

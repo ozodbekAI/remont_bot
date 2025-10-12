@@ -54,6 +54,36 @@ class MasterRepository(BaseRepository[Master]):
         result = await self.session.execute(stmt)
         return result.scalars().all()
    
+    async def get_by_skills_or_universal(self, skill_ids: list[int]) -> list[Master]:
+        """Kerakli naviklar + Универсал navikli masterlarni topadi"""
+        # Avval "Универсал" navikni topamiz
+        universal_skill_stmt = select(Skill.id).where(Skill.name == "Универсал")
+        universal_skill_result = await self.session.execute(universal_skill_stmt)
+        universal_skill_id = universal_skill_result.scalar_one_or_none()
+        
+        # Agar "Универсал" yo'q bo'lsa, oddiy usulda ishlaydi
+        if not universal_skill_id:
+            return await self.get_by_skills(skill_ids)
+        
+        # Kerakli naviklar + "Универсал" ni birlashtirish
+        all_skill_ids = skill_ids + [universal_skill_id]
+        
+        subquery = (
+            select(Master.id)
+            .join(master_skills)
+            .where(master_skills.c.skill_id.in_(all_skill_ids))
+            .distinct()
+        )
+    
+        stmt = (
+            select(Master)
+            .options(selectinload(Master.skills))
+            .where(Master.id.in_(subquery))
+        )
+    
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
     async def get_all_with_skills(self) -> List[Master]:
         result = await self.session.execute(
             select(Master).options(selectinload(Master.skills))
