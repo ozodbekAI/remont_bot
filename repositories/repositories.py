@@ -160,11 +160,16 @@ class AssignmentRepository(BaseRepository[Assignment]):
     def __init__(self, session: AsyncSession):
         super().__init__(Assignment, session)
    
+    
     async def get_by_master(self, master_id: int) -> List[Assignment]:
+        """Barcha assignments ni order bilan birga olish"""
         result = await self.session.execute(
-            select(Assignment).where(Assignment.master_id == master_id).options(selectinload(Assignment.order))
+            select(Assignment)
+            .where(Assignment.master_id == master_id)
+            .options(selectinload(Assignment.order))  # MUHIM: order ni ham yuklaymiz
+            .order_by(Assignment.id.desc())  # Eng yangilari birinchi
         )
-        return result.scalars().all()
+        return list(result.scalars().all())
    
     async def get_by_order(self, order_id: int) -> Optional[Assignment]:
         """Получить назначение по заказу"""

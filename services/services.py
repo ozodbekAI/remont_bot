@@ -61,9 +61,16 @@ class OrderService:
         assigned = assigned_master is not None
         
         return order, assigned
-   
+
+
     async def assign_to_master(self, order_id: int) -> Optional[Master]:
         """Назначить мастера БЕЗ автоматического подтверждения"""
+        
+        # ВАЖНО: Проверяем что заказ еще не назначен
+        existing_assignment = await self.assignment_repo.get_by_order(order_id)
+        if existing_assignment:
+            return None  # Уже назначен
+        
         order = await self.order_repo.get_with_skills(order_id)
         if not order or not order.required_skills:
             return None
@@ -101,7 +108,7 @@ class OrderService:
         await self.session.flush()
         await self.session.commit()
         return selected_master
-    
+
     async def _check_buffer_availability(self, master: Master, dt: datetime) -> bool:
         """Проверка доступности мастера с 4-часовым буфером"""
         if not master.schedule:
@@ -275,9 +282,18 @@ class MasterService:
        
         await self.session.commit()
    
+    
     async def get_master_orders(self, master_id: int) -> List[Order]:
+        """Получить все заказы мастера через assignments"""
         assignments = await self.assignment_repo.get_by_master(master_id)
-        return [a.order for a in assignments if a.order]
+        
+        # Извлекаем orders, убираем None значения
+        orders = [a.order for a in assignments if a.order is not None]
+        
+        # Сортируем по дате (новые сверху)
+        orders.sort(key=lambda x: x.datetime, reverse=True)
+        
+        return orders
    
     async def get_all_with_skills(self):
         result = await self.session.execute(
