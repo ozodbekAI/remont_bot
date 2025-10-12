@@ -33,7 +33,7 @@ class OrderService:
         count = await self.order_repo.count_for_date(datetime.date())
         date_str = datetime.strftime('%Y-%m-%d')
         number = f"{date_str}-{count + 1:03d}"
-       
+        
         order = await self.order_repo.create(
             number=number,
             client_name=client_name,
@@ -44,48 +44,86 @@ class OrderService:
             brand=brand,
             model=model,
             comment=comment,
-            status=OrderStatus.new
+            status=OrderStatus.new  # Всегда начинаем с "new"
         )
         await self.session.flush()
-       
+        
         if skill_ids:
             for skill_id in skill_ids:
                 stmt = insert(order_skills).values(order_id=order.id, skill_id=skill_id)
                 await self.session.execute(stmt)
-       
+        
         await self.session.commit()
         await self.session.refresh(order)
-       
+        
+        # ИСПРАВЛЕНО: Назначаем мастера БЕЗ изменения статуса
         assigned_master = await self.assign_to_master(order.id)
         assigned = assigned_master is not None
-       
+        
         return order, assigned
    
     async def assign_to_master(self, order_id: int) -> Optional[Master]:
+        """Назначить мастера БЕЗ автоматического подтверждения"""
         order = await self.order_repo.get_with_skills(order_id)
         if not order or not order.required_skills:
             return None
-       
+        
         skill_ids = [s.id for s in order.required_skills]
         masters = await self.master_repo.get_by_skills(skill_ids)
-       
+        
+        # Проверяем каждого мастера с учетом 4-часового буфера
+        suitable_masters = []
         for master in masters:
-            if await self.master_repo.is_free_at(master.id, order.datetime):
-                await self.assignment_repo.create(
-                    order_id=order.id,
-                    master_id=master.id
-                )
-                order.status = OrderStatus.confirmed
-                await self.master_repo.update_schedule(
-                    master.id,
-                    order.datetime,
-                    "busy"
-                )
-                await self.session.flush()
-                await self.session.commit()
-                return master
-       
-        return None
+            # Проверяем базовую доступность (точное время)
+            if not await self.master_repo.is_free_at(master.id, order.datetime):
+                continue
+            
+            # Проверяем 4-часовой буфер
+            if await self._check_buffer_availability(master, order.datetime):
+                suitable_masters.append(master)
+        
+        if not suitable_masters:
+            return None
+        
+        # Выбираем случайного мастера из подходящих
+        import random
+        selected_master = random.choice(suitable_masters)
+        
+        # Создаем назначение
+        await self.assignment_repo.create(
+            order_id=order.id,
+            master_id=selected_master.id
+        )
+        
+        # ВАЖНО: Статус остается "new", не меняем на "confirmed"!
+        # НЕ резервируем время сразу! Только после подтверждения мастером
+        
+        await self.session.flush()
+        await self.session.commit()
+        return selected_master
+    
+    async def _check_buffer_availability(self, master: Master, dt: datetime) -> bool:
+        """Проверка доступности мастера с 4-часовым буфером"""
+        if not master.schedule:
+            return True
+        
+        # Собираем все занятые слоты
+        busy_datetimes = []
+        for date_str, times in master.schedule.items():
+            for time_str in times:
+                try:
+                    busy_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+                    busy_datetimes.append(busy_dt)
+                except ValueError:
+                    continue
+        
+        # Проверяем 4-часовой буфер
+        buffer = timedelta(hours=4)
+        for busy_dt in busy_datetimes:
+            if abs(dt - busy_dt) < buffer:
+                return False
+        
+        return True
    
     async def update_status(
         self,
@@ -264,28 +302,29 @@ class MasterService:
             datetime: Время заказа
             skill_ids: Список ID необходимых навыков
             exclude_master_id: ID мастера, которого нужно исключить (например, отказавшегося)
-           
+            
         Returns:
             Master объект или None если не найден
         """
         if not skill_ids:
             return None
-       
+        
         # Получаем всех мастеров с нужными навыками
         masters = await self.master_repo.get_by_skills(skill_ids)
-       
+        
         suitable = []
         for master in masters:
             # Пропускаем исключенного мастера (того кто отказался)
             if exclude_master_id and master.id == exclude_master_id:
                 continue
             
+            # ИСПРАВЛЕНО: вызываем метод из текущего класса (self)
             if await self.is_available_with_buffer(master.id, datetime):
                 suitable.append(master)
-       
+        
         if suitable:
             return random.choice(suitable)
-       
+        
         return None
     
     async def is_available_with_buffer(self, master_id: int, dt: datetime) -> bool:

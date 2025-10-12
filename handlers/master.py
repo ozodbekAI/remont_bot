@@ -89,12 +89,19 @@ async def confirm_order(
     callback: CallbackQuery,
     master: Master,
     order_service: OrderService,
+    master_service: MasterService,  # ДОБАВЛЕНО
     bot: Bot
 ):
-    """Подтверждение заявки"""
+    """Подтверждение заявки мастером"""
     order_id = int(callback.data.split("_")[1])
+    
+    # Обновляем статус на confirmed
     order = await order_service.update_status(order_id, OrderStatus.confirmed)
-   
+    
+    # ВАЖНО: Теперь резервируем время мастера
+    await master_service.update_schedule(master.id, order.datetime, "busy")
+    await order_service.session.commit()
+    
     # Adminlarga xabar
     await notify_admins(
         bot,
@@ -106,7 +113,7 @@ async def confirm_order(
         f"📍 Адрес: {order.address}\n"
         f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}"
     )
-   
+    
     await callback.message.edit_text(
         f"✅ Вы подтвердили заявку #{order.number}!\n\n"
         f"👥 Клиент: {order.client_name}\n"
