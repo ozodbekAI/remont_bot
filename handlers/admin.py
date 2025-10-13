@@ -757,7 +757,7 @@ async def start_assign_existing_order(callback: CallbackQuery, state: FSMContext
 
 @router.callback_query(F.data.startswith("select_master_"))
 async def assign_selected_master(callback: CallbackQuery, state: FSMContext, order_service: OrderService, master_service: MasterService, bot: Bot):
-    _, _, order_id_str, master_id_str = callback.data.split("_")
+    _, _, master_id_str, order_id_str = callback.data.split("_")
     order_id = int(order_id_str)
     master_id = int(master_id_str)
     

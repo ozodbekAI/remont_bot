@@ -6,6 +6,8 @@ import asyncio
 import sys
 from pathlib import Path
 
+from services import master_service
+
 # Добавляем корневую директорию в путь
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -64,8 +66,10 @@ async def create_initial_skills(skill_service: SkillService):
     return created_skills
 
 
-async def create_demo_masters(master_service: MasterService, skills, session):
+async def create_demo_masters(skills, session):
     """Создать демо-мастеров"""
+    from models import Master
+    
     # Создаем словарь для быстрого поиска навыков по имени
     skill_map = {skill.name: skill.id for skill in skills}
     

@@ -55,6 +55,7 @@ def master_selection_kb(
     builder = InlineKeyboardBuilder()
     
     for info in masters_info:
+        print( info )  # Лог для текшириш
         master = info["master"]
         today_orders = info["today_orders"]
         skills = info["skills"]
@@ -64,13 +65,13 @@ def master_selection_kb(
             # Барча мастерлар кўрсатилаётган бўлса
             button_text = (
                 f"👤 {master.name}\n"
-                f"📦 Сегодня: {today_orders} | 🔧 {skills}"
+                f"📦: {today_orders} | 🔧 {skills}"
             )
         else:
             # Фақат мос мастерлар
             button_text = (
                 f"👤 {master.name}\n"
-                f"📦 Сегодня: {today_orders} | 🔧 {skills}"
+                f"📦: {today_orders} | 🔧 {skills}"
             )
         
         builder.row(
