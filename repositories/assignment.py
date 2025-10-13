@@ -97,3 +97,13 @@ class AssignmentRepository(BaseRepository[Assignment]):
             )
         )
         return len(list(result.scalars().all()))
+    
+    async def get_by_master(self, master_id: int) -> List[Assignment]:
+        """Получить все назначения мастера"""
+        result = await self.session.execute(
+            select(Assignment)
+            .where(Assignment.master_id == master_id)
+            .options(selectinload(Assignment.order))
+            .order_by(Assignment.assigned_at.desc())
+        )
+        return list(result.scalars().all())

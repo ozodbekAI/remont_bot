@@ -368,7 +368,7 @@ class MasterService:
         active_orders = [
             o for o in orders 
             if o.id in order_ids and o.status in [
-                OrderStatus.new, OrderStatus.confirmed, OrderStatus.in_progress, OrderStatus.arrived
+                OrderStatus.confirmed, OrderStatus.in_progress, OrderStatus.arrived
             ]
         ]
         return sorted(active_orders, key=lambda x: x.datetime)
