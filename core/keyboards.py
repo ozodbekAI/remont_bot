@@ -1,14 +1,10 @@
-from typing import List
+from typing import List, Dict
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from datetime import date, timedelta
 from models import OrderStatus
-
-from database.engine import get_session
-from services.services import SkillService, MasterService
 
 
 # ==================== ADMIN KEYBOARDS ====================
@@ -21,6 +17,107 @@ def admin_main_kb() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
+
+def order_assignment_choice_kb(order_id: int) -> InlineKeyboardMarkup:
+    """
+    Заявка яратилганда тайинлаш усулини танлаш
+    """
+    builder = InlineKeyboardBuilder()
+    
+    builder.row(
+        InlineKeyboardButton(
+            text="🤖 Автоматически назначить",
+            callback_data=f"auto_assign_{order_id}"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="👤 Выбрать мастера вручную",
+            callback_data=f"manual_assign_choice_{order_id}"
+        )
+    )
+    
+    return builder.as_markup()
+
+
+def master_selection_kb(
+    masters_info: List[Dict], 
+    order_id: int,
+    show_all: bool = False
+) -> InlineKeyboardMarkup:
+    """
+    Мастер танлаш клавиатураси
+    
+    masters_info: List[{"master": Master, "today_orders": int, "skills": str}]
+    order_id: Заявка ID
+    show_all: Агар True бўлса, барча мастерлар кўрсатилади (мос бўлмаса ҳам)
+    """
+    builder = InlineKeyboardBuilder()
+    
+    for info in masters_info:
+        master = info["master"]
+        today_orders = info["today_orders"]
+        skills = info["skills"]
+        
+        # Тугма матни
+        if show_all:
+            # Барча мастерлар кўрсатилаётган бўлса
+            button_text = (
+                f"👤 {master.name}\n"
+                f"📦 Сегодня: {today_orders} | 🔧 {skills}"
+            )
+        else:
+            # Фақат мос мастерлар
+            button_text = (
+                f"👤 {master.name}\n"
+                f"📦 Сегодня: {today_orders} | 🔧 {skills}"
+            )
+        
+        builder.row(
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"select_master_{master.id}_{order_id}"
+            )
+        )
+    
+    # Бекор қилиш тугмаси
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=f"cancel_assignment_{order_id}"
+        )
+    )
+    
+    return builder.as_markup()
+
+def master_selection_kbb(masters: List[Dict], order_id: int):
+    """
+    Создать клавиатуру для выбора мастера.
+    masters: список словарей с данными мастеров (из get_masters_for_assignment).
+    order_id: ID заказа для callback_data.
+    """
+    kb = InlineKeyboardBuilder()
+    
+    for m in masters:
+        master = m["master"]
+        availability = "🟢 Свободен" if m["is_available"] else "🔴 Занят"
+        orders = f"📋 Заказов сегодня: {m['today_orders']}"
+        skills_match = (
+            f"✅ Навыки: {m['skills']}\n"
+            f"Совпадение: {m['skills_match_percent']:.0f}% ({len(m['matching_skills'])}/{len(m['matching_skills']) + len(m['missing_skills'])})"
+            if m['matching_skills'] or m['missing_skills']
+            else f"✅ Навыки: {m['skills']}"
+        )
+        
+        button_text = f"{master.name}\n{availability}\n{orders}\n{skills_match}"
+        kb.button(
+            text=button_text,
+            callback_data=f"select_master_{order_id}_{master.id}"
+        )
+    
+    kb.button(text="🔙 Назад", callback_data="back_to_orders")
+    kb.adjust(1)  # Один мастер на строку
+    return kb.as_markup()
 
 def filters_kb() -> InlineKeyboardMarkup:
     """Фильтры для списка заявок"""
@@ -55,16 +152,15 @@ def masters_menu_kb() -> InlineKeyboardMarkup:
 
 
 async def skills_checkbox_kb(selected_ids: List[int] = None) -> InlineKeyboardMarkup:
-    """
-    Чекбоксы навыков (универсальная).
-    Используется и при создании заявки, и при добавлении мастера.
-    """
+    """Чекбоксы навыков"""
     if selected_ids is None:
         selected_ids = []
     
     builder = InlineKeyboardBuilder()
     
-    # Получаем все навыки
+    from database.engine import get_session
+    from services.skill_service import SkillService
+    
     async with get_session() as session:
         skill_service = SkillService(session)
         skills = await skill_service.get_all_skills()
@@ -85,99 +181,6 @@ async def skills_checkbox_kb(selected_ids: List[int] = None) -> InlineKeyboardMa
     return builder.as_markup()
 
 
-async def master_update_selection_kb() -> InlineKeyboardMarkup:
-    """Выбор мастера для обновления"""
-    builder = InlineKeyboardBuilder()
-    
-    async with get_session() as session:
-        from services.services import MasterService
-        master_service = MasterService(session)
-        masters = await master_service.get_all_with_skills()
-    
-    if not masters:
-        return InlineKeyboardMarkup(inline_keyboard=[])
-    
-    for master in masters:
-        builder.row(
-            InlineKeyboardButton(
-                text=f"{master.name} (ID: {master.telegram_id})",
-                callback_data=f"select_update_{master.id}"
-            )
-        )
-    
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="masters_cancel"))
-    return builder.as_markup()
-
-
-async def master_delete_selection_kb() -> InlineKeyboardMarkup:
-    """Выбор мастера для удаления"""
-    builder = InlineKeyboardBuilder()
-    
-    async with get_session() as session:
-        from services.services import MasterService
-        master_service = MasterService(session)
-        masters = await master_service.get_all_with_skills()
-    
-    if not masters:
-        return InlineKeyboardMarkup(inline_keyboard=[])
-    
-    for master in masters:
-        builder.row(
-            InlineKeyboardButton(
-                text=f"{master.name} (ID: {master.telegram_id})",
-                callback_data=f"select_delete_{master.id}"
-            )
-        )
-    
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="masters_cancel"))
-    return builder.as_markup()
-
-
-def master_update_menu_kb() -> InlineKeyboardMarkup:
-    """Меню выбора, что обновить у мастера"""
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="📝 Имя", callback_data="update_name"))
-    builder.row(InlineKeyboardButton(text="📞 Телефон", callback_data="update_phone"))
-    builder.row(InlineKeyboardButton(text="📱 Telegram ID", callback_data="update_telegram"))
-    builder.row(InlineKeyboardButton(text="🔧 Навыки", callback_data="update_skills"))
-    builder.row(InlineKeyboardButton(text="✅ Сохранить", callback_data="save_update"))
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="masters_cancel"))
-    return builder.as_markup()
-
-
-def master_delete_confirm_kb(master_id: int) -> InlineKeyboardMarkup:
-    """Подтверждение удаления мастера"""
-    builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"confirm_delete_{master_id}"))
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="masters_cancel"))
-    return builder.as_markup()
-
-
-async def manual_master_selection_kb(order_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура для ручного выбора мастера (НОВОЕ)"""
-    builder = InlineKeyboardBuilder()
-    
-    async with get_session() as session:
-        from services.services import MasterService
-        master_service = MasterService(session)
-        masters = await master_service.get_all_with_skills()
-    
-    if not masters:
-        return InlineKeyboardMarkup(inline_keyboard=[])
-    
-    for master in masters:
-        builder.row(
-            InlineKeyboardButton(
-                text=f"{master.name} (ID: {master.telegram_id})",
-                callback_data=f"assign_manual_{master.id}_{order_id}"
-            )
-        )
-    
-    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data=f"cancel_manual_{order_id}"))
-    return builder.as_markup()
-
-
-# ==================== REPORTS KEYBOARDS ====================
 def reports_menu_kb() -> InlineKeyboardMarkup:
     """Главное меню отчетов"""
     builder = InlineKeyboardBuilder()
@@ -218,45 +221,67 @@ def master_main_kb() -> ReplyKeyboardMarkup:
 
 
 def order_status_kb(order_id: int, status: OrderStatus) -> InlineKeyboardMarkup:
-    """Кнопки управления статусом заявки для мастера в зависимости от статуса"""
+    """Кнопки управления статусом заявки для мастера"""
     builder = InlineKeyboardBuilder()
     
     if status == OrderStatus.new:
-        # Показать "Беру" и "Отказ"
         builder.row(
             InlineKeyboardButton(text="✅ Беру!", callback_data=f"confirm_{order_id}"),
             InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
         )
     elif status == OrderStatus.confirmed:
-        # Показать "Выехал" и "Отказ"
         builder.row(
             InlineKeyboardButton(text="🚗 Выехал", callback_data=f"depart_{order_id}"),
             InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
         )
     elif status == OrderStatus.in_progress:
-        # Показать "Прибыл" и "Отказ"
         builder.row(
             InlineKeyboardButton(text="🏠 Прибыл", callback_data=f"arrive_{order_id}"),
             InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
         )
     elif status == OrderStatus.arrived:
-        # Показать "Завершить" и "Отказ"
         builder.row(
             InlineKeyboardButton(text="🛠️ Завершить", callback_data=f"complete_{order_id}"),
             InlineKeyboardButton(text="❌ Отказ", callback_data=f"reject_{order_id}")
         )
-    elif status == OrderStatus.completed:
-        # Нет кнопок или "Назад"
-        pass  # or builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_orders"))
     
     return builder.as_markup()
 
+
+
+def filters_kb() -> InlineKeyboardMarkup:
+    """Фильтры для списка заявок"""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="🆕 Новые", callback_data="filter_new"),
+        InlineKeyboardButton(text="✅ Подтвержденные", callback_data="filter_confirmed")
+    )
+    builder.row(
+        InlineKeyboardButton(text="🚗 В пути", callback_data="filter_work"),
+        InlineKeyboardButton(text="🏠 На месте", callback_data="filter_arrived")
+    )
+    builder.row(
+        InlineKeyboardButton(text="✅ Завершенные", callback_data="filter_done"),
+        InlineKeyboardButton(text="❌ Отклоненные", callback_data="filter_rejected")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📅 Сегодня", callback_data="filter_today"),
+        InlineKeyboardButton(text="👤 По мастеру", callback_data="filter_bymaster")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📋 Все", callback_data="filter_all")
+    )
+    return builder.as_markup()
 
 def master_orders_kb(has_active: bool = False) -> InlineKeyboardMarkup:
     """Фильтры для списка заявок мастера"""
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="📋 Активные", callback_data="master_orders_active"),
+        InlineKeyboardButton(text="🛠 Текущие работы", callback_data="master_current_orders"),
+        InlineKeyboardButton(text="📅 Работы на сегодня", callback_data="master_today_orders")
+    )
+    builder.row(
+        InlineKeyboardButton(text="📋 Все работы", callback_data="master_all_orders"),
         InlineKeyboardButton(text="✅ Архив", callback_data="master_orders_archive")
     )
     return builder.as_markup()

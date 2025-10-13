@@ -4,7 +4,7 @@ from aiogram.types import TelegramObject, Message, CallbackQuery, Update
 
 from config import ADMIN_IDS
 from database.engine import get_session
-from repositories.repositories import MasterRepository
+from repositories.master import MasterRepository
 
 
 class AuthMiddleware(BaseMiddleware):

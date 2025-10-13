@@ -1,3 +1,8 @@
+"""
+Models Package
+SQLAlchemy моделлар ва enumlar
+"""
+
 from datetime import datetime
 from enum import Enum as PyEnum
 from sqlalchemy import (
@@ -92,6 +97,10 @@ class Order(BaseModel):
     work_amount = Column(Float, default=0.0)
     expenses = Column(Float, default=0.0)
     profit = Column(Float, default=0.0)
+    
+    # Описание работ и фото
+    work_description = Column(Text, nullable=True)
+    work_photos = Column(JSON, nullable=True)  # List[str] - file_ids
     
     # Relationships
     required_skills = relationship("Skill", secondary=order_skills, back_populates="orders")

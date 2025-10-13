@@ -9,10 +9,11 @@ from pathlib import Path
 # Добавляем корневую директорию в путь
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from database.engine import DatabaseManager
+from database.engine import DatabaseManager, get_session
 from database.base import BaseModel
-from models import *  # Импорт моделей для регистрации в metadata
-from services.services import SkillService, MasterService
+from models import *
+from services.skill_service import SkillService
+from services.master_service import MasterService
 from sqlalchemy import insert
 
 factory = DatabaseManager()
@@ -43,6 +44,14 @@ async def create_initial_skills(skill_service: SkillService):
         {
             "name": "Универсал",
             "description": "Ремонт любой бытовой техники"
+        },
+        {
+            "name": "Варочная панель",
+            "description": "Ремонт варочных панелей"
+        },
+        {
+            "name": "Духовой шкаф",
+            "description": "Ремонт духовых шкафов"
         }
     ]
     
@@ -57,43 +66,109 @@ async def create_initial_skills(skill_service: SkillService):
 
 async def create_demo_masters(master_service: MasterService, skills, session):
     """Создать демо-мастеров"""
+    # Создаем словарь для быстрого поиска навыков по имени
+    skill_map = {skill.name: skill.id for skill in skills}
+    
     masters_data = [
         {
-            "name": "Иванов Иван",
-            "telegram_id": 111111111,  # Замените на реальный ID
+            "name": "Рустам 50/50",
+            "telegram_id": 7388574158,
             "phone": "+998901234567",
-            "skill_ids": [skills[0].id, skills[5].id]  # Стиралки + Универсал
+            "skill_names": ["Стиральные машины", "Посудомоечные машины", "Варочная панель"]
         },
         {
-            "name": "Петров Петр",
-            "telegram_id": 222222222,  # Замените на реальный ID
+            "name": "Данила",
+            "telegram_id": 1066527048,
             "phone": "+998901234568",
-            "skill_ids": [skills[1].id, skills[2].id]  # Холодильники + Кондиционеры
+            "skill_names": ["Стиральные машины"]
         },
         {
-            "name": "Сидоров Сидор",
-            "telegram_id": 333333333,  # Замените на реальный ID
+            "name": "Эдуард",
+            "telegram_id": 1727377979,
             "phone": "+998901234569",
-            "skill_ids": [skills[5].id]  # Универсал
+            "skill_names": ["Стиральные машины"]
+        },
+        {
+            "name": "Платонов Александр",
+            "telegram_id": 5041337189,
+            "phone": "+998901234570",
+            "skill_names": ["Посудомоечные машины", "Стиральные машины"]
+        },
+        {
+            "name": "Александр Парфенов",
+            "telegram_id": 5361679073,
+            "phone": "+998901234571",
+            "skill_names": ["Стиральные машины", "Посудомоечные машины"]
+        },
+        {
+            "name": "Александр (САНЧИЗ)",
+            "telegram_id": 704381585,
+            "phone": "+998901234572",
+            "skill_names": ["Универсал", "Стиральные машины", "Холодильники", "Кондиционеры", 
+                           "Посудомоечные машины", "Микроволновки", "Варочная панель", "Духовой шкаф"]
+        },
+        {
+            "name": "Конухов Максим",
+            "telegram_id": 777332150,
+            "phone": "+998901234573",
+            "skill_names": ["Стиральные машины", "Посудомоечные машины", "Варочная панель", 
+                           "Духовой шкаф", "Микроволновки"]
+        },
+        {
+            "name": "Лазарев Григорий Сергеевич",
+            "telegram_id": 2143023737,
+            "phone": "+998901234574",
+            "skill_names": ["Стиральные машины", "Холодильники", "Кондиционеры", "Посудомоечные машины", 
+                           "Микроволновки", "Универсал", "Варочная панель", "Духовой шкаф"]
+        },
+        {
+            "name": "Даниил Рыскаль",
+            "telegram_id": 1846886236,
+            "phone": "+998901234575",
+            "skill_names": ["Стиральные машины", "Холодильники", "Кондиционеры", "Посудомоечные машины", 
+                           "Универсал", "Варочная панель", "Микроволновки", "Духовой шкаф"]
+        },
+        {
+            "name": "Поздняков Павел",
+            "telegram_id": 5180625824,
+            "phone": "+998901234576",
+            "skill_names": ["Духовой шкаф", "Варочная панель", "Стиральные машины", 
+                           "Посудомоечные машины", "Микроволновки"]
+        },
+        {
+            "name": "Деянышев Максим",
+            "telegram_id": 580804505,
+            "phone": "+998901234577",
+            "skill_names": ["Стиральные машины", "Посудомоечные машины"]
+        },
+        {
+            "name": "Алексеев Сергей",
+            "telegram_id": 5428559076,
+            "phone": "+998901234578",
+            "skill_names": ["Стиральные машины"]
         }
     ]
     
     created_masters = []
     for master_data in masters_data:
         # Создаем мастера без навыков
-        basic_data = {k: v for k, v in master_data.items() if k != "skill_ids"}
+        basic_data = {
+            "name": master_data["name"],
+            "telegram_id": master_data["telegram_id"],
+            "phone": master_data["phone"]
+        }
         master = await master_service.create_master(**basic_data)
         created_masters.append(master)
         
-        # Добавляем связи с навыками напрямую в таблицу many-to-many
-        skill_ids = master_data["skill_ids"]
+        # Добавляем связи с навыками
+        skill_ids = [skill_map[name] for name in master_data["skill_names"] if name in skill_map]
         for sid in skill_ids:
             stmt = insert(master_skills).values(master_id=master.id, skill_id=sid)
             await session.execute(stmt)
         
         # Формируем имена навыков для вывода
-        skill_names = ", ".join(s.name for s in skills if s.id in skill_ids)
-        print(f"✅ Создан мастер: {master.name} (навыки: {skill_names})")
+        skill_names_str = ", ".join(master_data["skill_names"])
+        print(f"✅ Создан мастер: {master.name} (навыки: {skill_names_str})")
     
     return created_masters
 
@@ -104,6 +179,7 @@ async def main():
     # Получаем engine
     engine = await factory.get_engine()
     
+    # Пересоздаем схему БД
     metadata = BaseModel.metadata
     async with engine.begin() as conn:
         await conn.run_sync(metadata.drop_all)
@@ -111,24 +187,21 @@ async def main():
     print("✅ Схема БД пересоздана.\n")
     
     # Заполняем данными
-    from database.engine import get_session
     async with get_session() as session:
         skill_service = SkillService(session)
         master_service = MasterService(session)
         
-        print("\n📚 Создание навыков...")
+        print("📚 Создание навыков...")
         skills = await create_initial_skills(skill_service)
         
-        # print("\n👥 Создание мастеров...")
-        # masters = await create_demo_masters(master_service, skills, session)
-        
+        print("\n👥 Создание мастеров...")
+        masters = await create_demo_masters(master_service, skills, session)
         
         await session.commit()
         
         print(f"\n✅ Готово!")
         print(f"   Создано навыков: {len(skills)}")
-        # print(f"   Создано мастеров: {len(masters)}")
-        print("\n⚠️  ВАЖНО: Обновите Telegram ID мастеров в коде на реальные!")
+        print(f"   Создано мастеров: {len(masters)}")
 
 
 if __name__ == "__main__":

@@ -1,14 +1,18 @@
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputMediaPhoto
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from core.keyboards import master_main_kb, order_status_kb, master_orders_kb
-from services.services import OrderService, MasterService
+from services.order_service import OrderService
+from services.master_service import MasterService
 from models import OrderStatus, Master
 from core.utils import get_status_emoji, format_money
 from filters.role import RoleFilter
 from config import ADMIN_IDS
+from datetime import date
+
 router = Router()
+
 # ==================== FSM States ====================
 class MasterStates(StatesGroup):
     waiting_work_amount = State()
@@ -16,22 +20,20 @@ class MasterStates(StatesGroup):
     waiting_work_photos = State()
     waiting_work_description = State()
     waiting_admin_message = State()
-    waiting_reject_reason = State() # НОВОЕ: ожидание причины отказа
+    waiting_reject_reason = State()
+
 # ==================== Adminlarga xabar yuborish ====================
 async def notify_admins(bot: Bot, message: str, photos: list = None):
     """Barcha adminlarga xabar yuborish, shu bilan birga fotolar"""
     for admin_id in ADMIN_IDS:
         try:
-            # Avval matn yuboramiz
             await bot.send_message(admin_id, message)
-           
-            # Agar fotolar bo'lsa, media group sifatida yuboramiz
             if photos:
                 media_group = [InputMediaPhoto(media=photo_id) for photo_id in photos]
                 await bot.send_media_group(admin_id, media_group)
-               
         except Exception:
             continue
+
 # ==================== Главное меню ====================
 @router.message(F.text == "/start", RoleFilter("master"))
 async def master_start(msg: Message, state: FSMContext, master: Master):
@@ -41,6 +43,7 @@ async def master_start(msg: Message, state: FSMContext, master: Master):
         f"Выберите действие:",
         reply_markup=master_main_kb()
     )
+
 # ==================== Мои заявки ====================
 @router.message(F.text == "📋 Мои заявки")
 async def my_orders(msg: Message, state: FSMContext, master: Master, master_service: MasterService):
@@ -56,7 +59,6 @@ async def my_orders(msg: Message, state: FSMContext, master: Master, master_serv
         )
         return
    
-    # Разделяем на активные и завершенные
     active = [o for o in orders if o.status in [
         OrderStatus.new,
         OrderStatus.confirmed,
@@ -83,26 +85,231 @@ async def my_orders(msg: Message, state: FSMContext, master: Master, master_serv
         text += f"\n✅ Завершено: {len(completed)}"
    
     await msg.answer(text, reply_markup=master_orders_kb(bool(active)))
+
+# ==================== График ====================
+@router.message(F.text == "📅 График")
+async def show_schedule(msg: Message, state: FSMContext, master: Master, master_service: MasterService):
+    """Показать график работы"""
+    await state.clear()
+    
+    today_orders = await master_service.get_today_orders(master.id)
+    
+    if not master.schedule or not any(master.schedule.values()):
+        text = "📅 Ваш график пуст.\n"
+        if not today_orders:
+            text += "У вас нет назначенных заказов на сегодня."
+        else:
+            text += "Но у вас есть заказы на сегодня, проверьте 'Мои заявки'."
+        await msg.answer(text, reply_markup=master_main_kb())
+        return
+    
+    text = "📅 Ваш график:\n\n"
+    sorted_dates = sorted(master.schedule.keys())
+    
+    for date_str in sorted_dates[:7]:
+        times = master.schedule[date_str]
+        if times:
+            text += f"📆 {date_str}:\n"
+            for time, status in sorted(times.items()):
+                status_emoji = "🔴" 
+                text += f" • {time} {status_emoji} ({status})\n"
+            text += "\n"
+    
+    await msg.answer(text, reply_markup=master_main_kb())
+
+# ==================== Текущие работы ====================
+@router.callback_query(F.data == "master_current_orders")
+async def show_current_orders(callback: CallbackQuery, master: Master, master_service: MasterService, bot: Bot):
+    """Показать текущие активные заказы мастера"""
+    orders = await master_service.get_current_orders(master.id)
+    
+    if not orders:
+        await callback.message.edit_text(
+            "🛠 У вас нет текущих активных работ.",
+            reply_markup=master_orders_kb()
+        )
+        await callback.answer()
+        return
+    
+    text = "🛠 Текущие работы:\n\n"
+    for order in orders:
+        emoji = get_status_emoji(order.status.value)
+        text += (
+            f"{emoji} #{order.number}\n"
+            f" Клиент: {order.client_name}\n"
+            f" Адрес: {order.address}\n"
+            f" Время: {order.datetime.strftime('%d.%m %H:%M')}\n"
+            f" Статус: {order.status.value}\n\n"
+        )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"Изменить #{o.number}", callback_data=f"edit_order_{o.id}")]
+            for o in orders
+        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_orders")]])
+    )
+    await callback.answer()
+
+# ==================== Работы на сегодня ====================
+@router.callback_query(F.data == "master_today_orders")
+async def show_today_orders(callback: CallbackQuery, master: Master, master_service: MasterService, bot: Bot):
+    """Показать заказы мастера на сегодня"""
+    orders = await master_service.get_today_orders(master.id)
+    
+    if not orders:
+        await callback.message.edit_text(
+            "📅 На сегодня нет активных заказов.",
+            reply_markup=master_orders_kb()
+        )
+        await callback.answer()
+        return
+    
+    text = "📅 Работы на сегодня:\n\n"
+    for order in orders:
+        emoji = get_status_emoji(order.status.value)
+        text += (
+            f"{emoji} #{order.number}\n"
+            f" Клиент: {order.client_name}\n"
+            f" Адрес: {order.address}\n"
+            f" Время: {order.datetime.strftime('%d.%m %H:%M')}\n"
+            f" Статус: {order.status.value}\n\n"
+        )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"Изменить #{o.number}", callback_data=f"edit_order_{o.id}")]
+            for o in orders
+        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_orders")]])
+    )
+    await callback.answer()
+
+# ==================== Все работы ====================
+@router.callback_query(F.data == "master_all_orders")
+async def show_all_orders(callback: CallbackQuery, master: Master, master_service: MasterService, bot: Bot):
+    """Показать все заказы мастера"""
+    orders = await master_service.get_master_orders(master.id)
+    
+    if not orders:
+        await callback.message.edit_text(
+            "📋 У вас нет заказов.",
+            reply_markup=master_orders_kb()
+        )
+        await callback.answer()
+        return
+    
+    text = "📋 Все работы:\n\n"
+    for order in orders:
+        emoji = get_status_emoji(order.status.value)
+        text += (
+            f"{emoji} #{order.number}\n"
+            f" Клиент: {order.client_name}\n"
+            f" Адрес: {order.address}\n"
+            f" Время: {order.datetime.strftime('%d.%m %H:%M')}\n"
+            f" Статус: {order.status.value}\n\n"
+        )
+    
+    active_orders = [o for o in orders if o.status in [OrderStatus.new, OrderStatus.confirmed, OrderStatus.in_progress, OrderStatus.arrived]]
+    await callback.message.edit_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"Изменить #{o.number}", callback_data=f"edit_order_{o.id}")]
+            for o in active_orders
+        ] + [[InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_orders")]])
+    )
+    await callback.answer()
+
+# ==================== Архив ====================
+@router.callback_query(F.data == "master_orders_archive")
+async def show_archive_orders(callback: CallbackQuery, master: Master, master_service: MasterService):
+    """Показать завершенные заказы"""
+    orders = await master_service.get_master_orders(master.id)
+    completed = [o for o in orders if o.status == OrderStatus.completed]
+    
+    if not completed:
+        await callback.message.edit_text(
+            "✅ Архив пуст",
+            reply_markup=master_orders_kb()
+        )
+        await callback.answer()
+        return
+    
+    text = "✅ Завершенные заявки:\n\n"
+    total_profit = 0
+    
+    for order in completed[:10]:
+        text += (
+            f"#{order.number} - {order.client_name}\n"
+            f" Прибыль: {format_money(order.profit)}\n"
+        )
+        total_profit += order.profit
+    
+    text += f"\n💎 Общая прибыль: {format_money(total_profit)}"
+    
+    await callback.message.edit_text(text, reply_markup=master_orders_kb())
+    await callback.answer()
+
+# ==================== Изменение статуса заказа ====================
+@router.callback_query(F.data.startswith("edit_order_"))
+async def edit_order(callback: CallbackQuery, master: Master, order_service: OrderService, master_service: MasterService, bot: Bot):
+    """Изменение статуса заказа"""
+    order_id = int(callback.data.split("_")[2])
+    order = await order_service.order_repo.get(order_id)
+    
+    if not order:
+        await callback.message.edit_text(
+            "❌ Заявка не найдена!",
+            reply_markup=master_orders_kb()
+        )
+        await callback.answer()
+        return
+    
+    if order.status == OrderStatus.completed:
+        await callback.message.edit_text(
+            f"✅ Заявка #{order.number} завершена и не может быть изменена.\n\n"
+            f"👥 Клиент: {order.client_name}\n"
+            f"📞 Телефон: {order.phone}\n"
+            f"📍 Адрес: {order.address}\n"
+            f"📅 Время: {order.datetime.strftime('%d.%m %H:%M')}\n"
+            f"💬 Проблема: {order.comment}",
+            reply_markup=master_orders_kb()
+        )
+        await callback.answer()
+        return
+    
+    text = (
+        f"📋 Заявка #{order.number}\n"
+        f"👥 Клиент: {order.client_name}\n"
+        f"📞 Телефон: {order.phone}\n"
+        f"📍 Адрес: {order.address}\n"
+        f"📅 Время: {order.datetime.strftime('%d.%m %H:%M')}\n"
+        f"💬 Проблема: {order.comment}\n"
+        f"🔄 Статус: {order.status.value}"
+    )
+    
+    await callback.message.edit_text(
+        text,
+        reply_markup=order_status_kb(order.id, order.status)
+    )
+    await callback.answer()
+
 # ==================== Управление статусом ====================
 @router.callback_query(F.data.startswith("confirm_"))
 async def confirm_order(
     callback: CallbackQuery,
     master: Master,
     order_service: OrderService,
-    master_service: MasterService,  # ДОБАВЛЕНО
+    master_service: MasterService,
     bot: Bot
 ):
     """Подтверждение заявки мастером"""
     order_id = int(callback.data.split("_")[1])
-    
-    # Обновляем статус на confirmed
     order = await order_service.update_status(order_id, OrderStatus.confirmed)
     
-    # ВАЖНО: Теперь резервируем время мастера
-    await master_service.update_schedule(master.id, order.datetime, "busy")
+    await master_service.update_schedule(master.id, order.datetime, "надо сделать")
     await order_service.session.commit()
     
-    # Adminlarga xabar
     await notify_admins(
         bot,
         f"✅ Мастер принял заказ!\n\n"
@@ -124,6 +331,7 @@ async def confirm_order(
         reply_markup=order_status_kb(order.id, order.status)
     )
     await callback.answer("✅ Заявка подтверждена")
+
 @router.callback_query(F.data.startswith("depart_"))
 async def depart_order(
     callback: CallbackQuery,
@@ -135,7 +343,6 @@ async def depart_order(
     order_id = int(callback.data.split("_")[1])
     order = await order_service.update_status(order_id, OrderStatus.in_progress)
    
-    # Adminlarga xabar
     await notify_admins(
         bot,
         f"🚗 Мастер выехал на заказ!\n\n"
@@ -156,6 +363,7 @@ async def depart_order(
         reply_markup=order_status_kb(order.id, order.status)
     )
     await callback.answer("🚗 В пути")
+
 @router.callback_query(F.data.startswith("arrive_"))
 async def arrive_order(
     callback: CallbackQuery,
@@ -167,7 +375,6 @@ async def arrive_order(
     order_id = int(callback.data.split("_")[1])
     order = await order_service.update_status(order_id, OrderStatus.arrived)
    
-    # Adminlarga xabar
     await notify_admins(
         bot,
         f"🏠 Мастер прибыл на место!\n\n"
@@ -185,16 +392,18 @@ async def arrive_order(
         f"📞 Телефон: {order.phone}\n"
         f"📍 Адрес: {order.address}\n"
         f"💬 Проблема: {order.comment}\n"
-        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n",
+        f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n\n"
         f"Начинайте работу.\n"
         f"После завершения нажмите 'Завершить'.",
         reply_markup=order_status_kb(order.id, order.status)
     )
     await callback.answer("🏠 Прибыли")
+
 @router.callback_query(F.data.startswith("complete_"))
 async def complete_order_start(
     callback: CallbackQuery,
-    state: FSMContext
+    state: FSMContext,
+    master_service: MasterService
 ):
     """Начало завершения заявки"""
     order_id = int(callback.data.split("_")[1])
@@ -206,6 +415,7 @@ async def complete_order_start(
         "Например: 1500"
     )
     await callback.answer()
+
 @router.message(MasterStates.waiting_work_amount)
 async def process_work_amount(msg: Message, state: FSMContext):
     """Обработка суммы работы"""
@@ -223,6 +433,7 @@ async def process_work_amount(msg: Message, state: FSMContext):
         )
     except ValueError:
         await msg.answer("❌ Неверный формат. Введите число, например: 150000")
+
 @router.message(MasterStates.waiting_expenses)
 async def process_expenses(msg: Message, state: FSMContext):
     """Обработка расходов"""
@@ -245,13 +456,13 @@ async def process_expenses(msg: Message, state: FSMContext):
         )
     except ValueError:
         await msg.answer("❌ Неверный формат. Введите число, например: 50000")
+
 @router.message(MasterStates.waiting_work_photos, F.photo)
 async def receive_work_photo(msg: Message, state: FSMContext):
     """Получение фото работ"""
     data = await state.get_data()
     photos = data.get("work_photos", [])
    
-    # Сохраняем file_id самого большого фото
     photos.append(msg.photo[-1].file_id)
     await state.update_data(work_photos=photos)
    
@@ -259,6 +470,7 @@ async def receive_work_photo(msg: Message, state: FSMContext):
         f"✅ Фото получено! Всего: {len(photos)}\n"
         f"Отправьте еще фото или нажмите 'Готово'"
     )
+
 @router.message(MasterStates.waiting_work_photos, F.text.in_(["✅ Готово", "/done"]))
 async def photos_done(msg: Message, state: FSMContext):
     """Завершение приема фото"""
@@ -285,6 +497,7 @@ async def photos_done(msg: Message, state: FSMContext):
         "Например: Замена компрессора, заправка фреоном, проверка системы",
         reply_markup=ReplyKeyboardRemove()
     )
+
 @router.message(MasterStates.waiting_work_photos, F.text == "⏭️ Пропустить")
 async def skip_photos(msg: Message, state: FSMContext):
     """Пропустить фото"""
@@ -295,6 +508,7 @@ async def skip_photos(msg: Message, state: FSMContext):
         "Например: Замена компрессора, заправка фреоном, проверка системы",
         reply_markup=ReplyKeyboardRemove()
     )
+
 @router.message(MasterStates.waiting_work_photos)
 async def invalid_photo_input(msg: Message):
     """Неверный ввод при ожидании фото"""
@@ -302,12 +516,14 @@ async def invalid_photo_input(msg: Message):
         "❌ Пожалуйста, отправьте фото или нажмите 'Готово'\n"
         "Если не хотите отправлять фото, нажмите 'Пропустить'"
     )
+
 @router.message(MasterStates.waiting_work_description)
 async def complete_order_finish(
     msg: Message,
     state: FSMContext,
     master: Master,
     order_service: OrderService,
+    master_service: MasterService,
     bot: Bot
 ):
     """Завершение заявки с расчетом"""
@@ -329,7 +545,17 @@ async def complete_order_finish(
         work_photos=work_photos
     )
    
-    # Adminlarga xabar va fotolar
+    # Графикни yangilash
+    try:
+        await master_service.update_schedule(master.id, order.datetime, "завершено")
+    except Exception as e:
+        await bot.send_message(
+            ADMIN_IDS[0],
+            f"⚠️ Графикни yangilashda xatolik yuz berdi (Master ID: {master.id}): {str(e)}"
+        )
+    
+    await order_service.session.commit()
+   
     admin_message = (
         f"✅ Заказ завершён!\n\n"
         f"👤 Мастер: {master.name}\n"
@@ -357,7 +583,8 @@ async def complete_order_finish(
         reply_markup=master_main_kb()
     )
     await state.clear()
-# ==================== НОВОЕ: Отказ с причиной ====================
+
+# ==================== Отказ с причиной ====================
 @router.callback_query(F.data.startswith("reject_"))
 async def reject_order_ask_reason(
     callback: CallbackQuery,
@@ -367,16 +594,27 @@ async def reject_order_ask_reason(
     order_id = int(callback.data.split("_")[1])
     await state.update_data(reject_order_id=order_id)
     await state.set_state(MasterStates.waiting_reject_reason)
-   
+    
     await callback.message.edit_text(
         "❌ Укажите причину отказа от заявки:\n\n"
         "Например:\n"
         "- Занят на другом объекте\n"
         "- Слишком далеко\n"
         "- Нет нужных запчастей\n"
-        "- Проблема не по моей специализации"
+        "- Проблема не по моей специализации\n\n"
+        "Или отправьте /cancel для отмены"
     )
     await callback.answer()
+
+@router.message(MasterStates.waiting_reject_reason, F.text == "/cancel")
+async def cancel_reject(msg: Message, state: FSMContext):
+    """Бекор қилиш"""
+    await state.clear()
+    await msg.answer(
+        "❌ Отказ отменён",
+        reply_markup=master_main_kb()
+    )
+
 @router.message(MasterStates.waiting_reject_reason)
 async def reject_order_with_reason(
     msg: Message,
@@ -388,53 +626,41 @@ async def reject_order_with_reason(
 ):
     """Отказ от заявки с причиной и попытка переназначения"""
     reject_reason = msg.text.strip()
-   
+    
     if len(reject_reason) < 5:
         await msg.answer("❌ Причина слишком короткая. Укажите более подробно:")
         return
-   
+    
     data = await state.get_data()
     order_id = data["reject_order_id"]
-   
-    # Получаем заказ с навыками
+    
     order = await order_service.order_repo.get_with_skills(order_id)
     if not order:
         await msg.answer("❌ Заявка не найдена!", reply_markup=master_main_kb())
         await state.clear()
         return
-   
-    # Обновляем статус на rejected
-    order.status = OrderStatus.rejected
-   
-    # Удаляем назначение на текущего мастера
+    
     assignment = await order_service.assignment_repo.get_by_order(order_id)
     if assignment:
         await order_service.assignment_repo.delete(assignment.id)
-   
-    # Освобождаем время в графике мастера
-    await master_service.update_schedule(master.id, order.datetime, "free")
-   
+    
+    await master_service.update_schedule(master.id, order.datetime, "отменено")
+    order = await order_service.update_status(order_id, OrderStatus.rejected)
+    
     await order_service.session.commit()
-   
-    # Сохраняем причину отказа в комментарий или отдельное поле
-    # (если нужно, добавьте поле reject_reason в модель Order)
-   
-    # Пытаемся найти другого мастера автоматически
+    
     skill_ids = [s.id for s in order.required_skills] if order.required_skills else []
     new_master = await master_service.find_available_master(
         datetime=order.datetime,
         skill_ids=skill_ids,
         exclude_master_id=master.id
     )
-   
+    
     if new_master:
-        # Назначаем новому мастеру
-        await order_service.assignment_repo.create(order_id=order_id, master_id=new_master.id)
-        order.status = OrderStatus.confirmed
-        await master_service.update_schedule(new_master.id, order.datetime, "busy")
+        await order_service.assign_master_to_order(order_id, new_master.id)
+        order = await order_service.update_status(order_id, OrderStatus.new)
         await order_service.session.commit()
-       
-        # Уведомляем нового мастера
+        
         await bot.send_message(
             new_master.telegram_id,
             f"🆕 Новая заявка #{order.number}!\n\n"
@@ -444,10 +670,9 @@ async def reject_order_with_reason(
             f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n"
             f"🔧 Техника: {order.type} {order.brand} {order.model}\n"
             f"💬 Проблема: {order.comment}",
-            reply_markup=order_status_kb(order.id, order.status)
+            reply_markup=order_status_kb(order.id, OrderStatus.new)
         )
-       
-        # Уведомляем админа об успешном переназначении
+        
         await notify_admins(
             bot,
             f"❌ Мастер отказался от заказа\n\n"
@@ -460,18 +685,13 @@ async def reject_order_with_reason(
             f"📍 Адрес: {order.address}\n"
             f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}"
         )
-       
+        
         await msg.answer(
             f"❌ Вы отказались от заявки #{order.number}\n\n"
-            f"✅ Заявка автоматически назначена другому мастеру.",
+            f"✅ Заявка автоматически назначена другому мастеру: {new_master.name}",
             reply_markup=master_main_kb()
         )
     else:
-        # Не найден свободный мастер - требуется ручное назначение админом
-        from core.keyboards import manual_master_selection_kb
-       
-        admin_kb = await manual_master_selection_kb(order.id)
-       
         await notify_admins(
             bot,
             f"❌ Мастер отказался от заказа!\n\n"
@@ -482,53 +702,59 @@ async def reject_order_with_reason(
             f"👥 Клиент: {order.client_name}\n"
             f"📍 Адрес: {order.address}\n"
             f"📅 Время: {order.datetime.strftime('%d.%m.%Y %H:%M')}\n\n"
-            f"👇 Назначьте мастера вручную:"
+            f"Назначьте мастера вручную через меню 'Заявки'"
         )
-       
-        # Отправляем клавиатуру для ручного назначения админу
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(
-                    admin_id,
-                    f"Выберите мастера для заявки #{order.number}:",
-                    reply_markup=admin_kb
-                )
-            except Exception:
-                continue
-       
+        
         await msg.answer(
             f"❌ Вы отказались от заявки #{order.number}\n\n"
-            f"⚠️ Заявка требует назначения администратором.",
+            f"⚠️ Свободный мастер не найден.\n"
+            f"Заявка будет назначена администратором.",
             reply_markup=master_main_kb()
         )
-   
+    
+    try:
+        await bot.delete_message(chat_id=msg.chat.id, message_id=msg.message_id - 1)
+    except:
+        pass
+    
     await state.clear()
-# ==================== График ====================
-@router.message(F.text == "📅 График")
-async def show_schedule(msg: Message, state: FSMContext, master: Master):
-    """Показать график работы"""
-    await state.clear()
-    if not master.schedule:
-        await msg.answer(
-            "📅 Ваш график пуст.\n"
-            "График автоматически заполняется при назначении заявок.",
-            reply_markup=master_main_kb()
+
+# ==================== Назад к списку заявок ====================
+@router.callback_query(F.data == "back_to_orders")
+async def back_to_orders(callback: CallbackQuery, master: Master, master_service: MasterService):
+    """Вернуться к списку заявок"""
+    orders = await master_service.get_master_orders(master.id)
+    
+    if not orders:
+        await callback.message.edit_text(
+            "📋 У вас пока нет заявок.\n"
+            "Ожидайте назначения от администратора.",
+            reply_markup=master_orders_kb()
         )
+        await callback.answer()
         return
-   
-    text = "📅 Ваш график:\n\n"
-   
-    sorted_dates = sorted(master.schedule.keys())
-   
-    for date_str in sorted_dates[:7]:
-        times = master.schedule[date_str]
-        if times:
-            text += f"📆 {date_str}:\n"
-            for time in sorted(times):
-                text += f" • {time}\n"
-            text += "\n"
-   
-    await msg.answer(text, reply_markup=master_main_kb())
+    
+    text = "📋 Ваши заявки:\n\n"
+    active = [o for o in orders if o.status in [OrderStatus.new, OrderStatus.confirmed, OrderStatus.in_progress, OrderStatus.arrived]]
+    
+    if active:
+        text += "🔄 Активные:\n"
+        for order in active[:5]:
+            emoji = get_status_emoji(order.status.value)
+            text += (
+                f"{emoji} #{order.number}\n"
+                f" Клиент: {order.client_name}\n"
+                f" Адрес: {order.address}\n"
+                f" Время: {order.datetime.strftime('%d.%m %H:%M')}\n\n"
+            )
+    
+    completed = [o for o in orders if o.status == OrderStatus.completed]
+    if completed:
+        text += f"\n✅ Завершено: {len(completed)}"
+    
+    await callback.message.edit_text(text, reply_markup=master_orders_kb(bool(active)))
+    await callback.answer()
+
 # ==================== Сообщение админу ====================
 @router.message(F.text == "💬 Админу")
 async def message_admin_start(msg: Message, state: FSMContext):
@@ -539,6 +765,7 @@ async def message_admin_start(msg: Message, state: FSMContext):
         "💬 Напишите сообщение администратору:\n"
         "(или отправьте /cancel для отмены)"
     )
+
 @router.message(MasterStates.waiting_admin_message)
 async def send_message_to_admin(msg: Message, state: FSMContext, master: Master, bot: Bot):
     """Отправка сообщения админу"""
@@ -547,7 +774,7 @@ async def send_message_to_admin(msg: Message, state: FSMContext, master: Master,
         f"👤 {master.name} (ID: {master.telegram_id})\n"
         f"💬 {msg.text}"
     )
-   
+    
     success_count = 0
     for admin_id in ADMIN_IDS:
         try:
@@ -555,7 +782,7 @@ async def send_message_to_admin(msg: Message, state: FSMContext, master: Master,
             success_count += 1
         except Exception:
             continue
-   
+    
     if success_count > 0:
         await msg.answer(
             "✅ Сообщение отправлено администратору!",
@@ -567,75 +794,5 @@ async def send_message_to_admin(msg: Message, state: FSMContext, master: Master,
             "Попробуйте позже.",
             reply_markup=master_main_kb()
         )
-   
+    
     await state.clear()
-@router.callback_query(F.data == "master_orders_active")
-async def show_active_orders(
-    callback: CallbackQuery,
-    master: Master,
-    master_service: MasterService
-):
-    """Показать только активные заявки"""
-    orders = await master_service.get_master_orders(master.id)
-   
-    active = [o for o in orders if o.status in [
-        OrderStatus.new,
-        OrderStatus.confirmed,
-        OrderStatus.in_progress,
-        OrderStatus.arrived
-    ]]
-   
-    if not active:
-        await callback.message.edit_text(
-            "📋 Нет активных заявок",
-            reply_markup=master_orders_kb()
-        )
-        await callback.answer()
-        return
-   
-    text = "🔄 Активные заявки:\n\n"
-    for order in active:
-        emoji = get_status_emoji(order.status.value)
-        text += (
-            f"{emoji} #{order.number}\n"
-            f" Клиент: {order.client_name}\n"
-            f" Адрес: {order.address}\n"
-            f" Время: {order.datetime.strftime('%d.%m %H:%M')}\n"
-            f" Статус: {order.status.value}\n\n"
-        )
-   
-    await callback.message.edit_text(text, reply_markup=master_orders_kb())
-    await callback.answer()
-@router.callback_query(F.data == "master_orders_archive")
-async def show_archive_orders(
-    callback: CallbackQuery,
-    master: Master,
-    master_service: MasterService
-):
-    orders = await master_service.get_master_orders(master.id)
-   
-    completed = [o for o in orders if o.status == OrderStatus.completed]
-   
-    if not completed:
-        await callback.message.edit_text(
-            "📋 Архив пуст",
-            reply_markup=master_orders_kb()
-        )
-        await callback.answer()
-        return
-   
-    text = "✅ Завершенные заявки:\n\n"
-    total_profit = 0
-   
-    for order in completed[:10]:
-        text += (
-            f"#{order.number} - {order.client_name}\n"
-            f" Прибыль: {format_money(order.profit)}\n"
-        )
-        total_profit += order.profit
-   
-    text += f"\n💎 Общая прибыль: {format_money(total_profit)}"
-   
-    await callback.message.edit_text(text, reply_markup=master_orders_kb())
-    await callback.answer()
-

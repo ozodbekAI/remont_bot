@@ -11,7 +11,7 @@ from database.engine import init_db, DatabaseManager, get_session
 
 from core.dependencies import ServiceMiddleware
 from models import OrderStatus
-from services.services import OrderService
+from services.order_service import OrderService
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
@@ -79,16 +79,6 @@ async def auto_assign_pending_orders(bot):
 
 async def on_startup(bot: Bot):
     await init_db()
-    
-    # Start scheduler
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        auto_assign_pending_orders,
-        "interval",
-        minutes=5,  # Check every 5 minutes
-        args=(bot,)
-    )
-    scheduler.start()
 
 
 async def on_shutdown(bot: Bot):
