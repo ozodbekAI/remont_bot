@@ -347,7 +347,7 @@ class MasterService:
         orders = await self.order_repo.get_by_ids(order_ids)
         active_orders = [
             o for o in orders 
-            if o.status in [OrderStatus.confirmed, OrderStatus.in_progress, OrderStatus.arrived]
+            if o.status in [OrderStatus.in_progress, OrderStatus.arrived]
         ]
         return sorted(active_orders, key=lambda x: x.datetime, reverse=True)
     
