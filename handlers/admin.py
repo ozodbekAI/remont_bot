@@ -124,7 +124,7 @@ def order_delete_confirm_kb(order_id: int) -> InlineKeyboardMarkup:
     """Клавиатура подтверждения удаления заказа"""
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Подтвердить удаление", callback_data=f"confirm_order_delete_{order_id}"),
+        InlineKeyboardButton(text="✅ Подтвердить удаление", callback_data=f"confirmorder_delete_{order_id}"),
         InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_order_delete")
     )
     return builder.as_markup()
@@ -534,36 +534,55 @@ async def filter_orders_by_master(callback: CallbackQuery, order_service: OrderS
 
 @router.callback_query(F.data.startswith("filter_"))
 async def filter_orders(callback: CallbackQuery, order_service: OrderService, master_service: MasterService, state: FSMContext):
-    filter_type = callback.data.split("_")[1]
+    data_parts = callback.data.split("_")
+    filter_type = data_parts[1]
+    page_str = data_parts[2] if len(data_parts) > 2 else "1"
+    try:
+        page = int(page_str)
+    except ValueError:
+        page = 1
+    
+    limit = 5
+    offset = (page - 1) * limit
     
     if filter_type == "all":
-        orders = await order_service.order_repo.get_all(limit=50)
+        orders = await order_service.order_repo.get_all(limit=limit, offset=offset)
         title = "Все заявки"
+        total_orders = await order_service.order_repo.get_count()
     elif filter_type == "new":
-        orders = await order_service.get_orders_by_filter(status=OrderStatus.new)
+        orders = await order_service.get_orders_by_filter(status=OrderStatus.new, limit=limit, offset=offset)
         title = "Новые заявки"
+        total_orders = await order_service.get_orders_count_by_filter(status=OrderStatus.new)  # Assume similar count method
     elif filter_type == "confirmed":
-        orders = await order_service.get_orders_by_filter(status=OrderStatus.confirmed)
+        orders = await order_service.get_orders_by_filter(status=OrderStatus.confirmed, limit=limit, offset=offset)
         title = "Подтвержденные заявки"
+        total_orders = await order_service.get_orders_count_by_filter(status=OrderStatus.confirmed)
     elif filter_type == "work":
-        orders = await order_service.get_orders_by_filter(status=OrderStatus.in_progress)
+        orders = await order_service.get_orders_by_filter(status=OrderStatus.in_progress, limit=limit, offset=offset)
         title = "В работе"
+        total_orders = await order_service.get_orders_count_by_filter(status=OrderStatus.in_progress)
     elif filter_type == "arrived":
-        orders = await order_service.get_orders_by_filter(status=OrderStatus.arrived)
+        orders = await order_service.get_orders_by_filter(status=OrderStatus.arrived, limit=limit, offset=offset)
         title = "Мастер на месте"
+        total_orders = await order_service.get_orders_count_by_filter(status=OrderStatus.arrived)
     elif filter_type == "done":
-        orders = await order_service.get_orders_by_filter(status=OrderStatus.completed)
+        orders = await order_service.get_orders_by_filter(status=OrderStatus.completed, limit=limit, offset=offset)
         title = "Завершенные"
+        total_orders = await order_service.get_orders_count_by_filter(status=OrderStatus.completed)
     elif filter_type == "rejected":
-        orders = await order_service.get_orders_by_filter(status=OrderStatus.rejected)
+        orders = await order_service.get_orders_by_filter(status=OrderStatus.rejected, limit=limit, offset=offset)
         title = "Отклоненные"
+        total_orders = await order_service.get_orders_count_by_filter(status=OrderStatus.rejected)
     elif filter_type == "today":
         from datetime import date
         orders = await order_service.order_repo.get_by_date_range(
             date.today(), 
-            date.today()
+            date.today(),
+            limit=limit,
+            offset=offset
         )
         title = "Заявки на сегодня"
+        total_orders = await order_service.order_repo.get_count_by_date_range(date.today(), date.today())  # Assume count method
     elif filter_type == "bymaster":
         print("Filter by master selected")
         # Переходим к выбору мастера для фильтра
@@ -575,6 +594,10 @@ async def filter_orders(callback: CallbackQuery, order_service: OrderService, ma
     else:
         orders = []
         title = "Неизвестный фильтр"
+        total_orders = 0
+    
+    # Store filter and page in state for navigation
+    await state.update_data(filter_type=filter_type, current_page=page)
     
     if not orders:
         await callback.message.edit_text(
@@ -584,7 +607,7 @@ async def filter_orders(callback: CallbackQuery, order_service: OrderService, ma
         await callback.answer()
         return
     
-    text = f"📋 {title}:\n\n"
+    text = f"📋 {title} (страница {page} из {((total_orders - 1) // limit + 1)}):\n\n"
     builder = InlineKeyboardBuilder()
     
     for order in orders:
@@ -605,6 +628,16 @@ async def filter_orders(callback: CallbackQuery, order_service: OrderService, ma
         row_buttons.append(InlineKeyboardButton(text="Подробности", callback_data=f"view_order_{order.id}"))
         row_buttons.append(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_order_{order.id}"))
         builder.row(*row_buttons)
+    
+    # Pagination buttons
+    total_pages = (total_orders - 1) // limit + 1
+    pagination_row = []
+    if page > 1:
+        pagination_row.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"filter_{filter_type}_{page-1}"))
+    if page < total_pages:
+        pagination_row.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"filter_{filter_type}_{page+1}"))
+    if pagination_row:
+        builder.row(*pagination_row)
     
     builder.row(InlineKeyboardButton(text="🔙 Назад к фильтрам", callback_data="back_to_filters"))
     await callback.message.edit_text(text, reply_markup=builder.as_markup())
@@ -675,7 +708,7 @@ async def confirm_order_delete(callback: CallbackQuery, state: FSMContext, order
     )
     await callback.answer()
 
-@router.callback_query(F.data.startswith("confirm_order_delete_"), AdminStates.confirming_order_delete)
+@router.callback_query(F.data.startswith("confirmorder_delete_"), AdminStates.confirming_order_delete)
 async def perform_order_delete(callback: CallbackQuery, state: FSMContext, order_service: OrderService, master_service: MasterService, bot: Bot):
     data = await state.get_data()
     order_id = data["delete_order_id"]
@@ -686,30 +719,14 @@ async def perform_order_delete(callback: CallbackQuery, state: FSMContext, order
         await state.clear()
         return
     
-    # Получаем назначение
     assignment = await order_service.assignment_repo.get_by_order(order_id)
-    master_id = assignment.master_id if assignment else None
     
-    # Удаляем заказ (удаляет и назначение)
     success = await order_service.delete_order(order_id)
-    
+ 
     if success:
-        # Если был мастер и статус был confirmed или выше, освобождаем график
-        if master_id and order.status in [OrderStatus.confirmed, OrderStatus.in_progress, OrderStatus.arrived]:
-            await master_service.update_schedule(master_id, order.datetime, "отдан другому мвстеру")
-        
-        # Уведомляем мастера, если был назначен
-        if master_id:
-            master = await master_service.master_repo.get(master_id)
-            if master:
-                await bot.send_message(
-                    master.telegram_id,
-                    f"❌ Заявка #{order.number} была отменена администратором."
-                )
-        
         await callback.message.edit_text(f"✅ Заявка #{order.number} удалена!")
     else:
-        await callback.message.edit_text(f"❌ Не удалось удалить заявку #{order.number}!")
+        await callback.message.edit_text(f"❌ Не удалось удалить заявку #{order.number} мастер назначен!")
 
     await callback.message.answer("Выберите действие:", reply_markup=admin_main_kb())
     await state.clear()

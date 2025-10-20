@@ -1,6 +1,6 @@
 from typing import Optional, List, Tuple
 from datetime import datetime, date
-from sqlalchemy import insert
+from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Order, OrderStatus, order_skills
@@ -132,6 +132,8 @@ class OrderService:
         await self.session.refresh(order)
         return order
     
+
+
     async def get_orders_by_filter(
         self,
         status: Optional[OrderStatus] = None,
@@ -145,3 +147,41 @@ class OrderService:
             return await self.order_repo.get_by_status(status)
         else:
             return await self.order_repo.get_all(limit=100)
+        
+        
+
+    async def get_all(self) -> List[Order]:
+        """Получить все заказы"""
+        return await self.order_repo.get_all(
+            limit=5
+        )
+    
+    async def get_orders_by_filter(self, status: OrderStatus, limit: Optional[int] = None, offset: Optional[int] = 0) -> List[Order]:
+        """Получить заказы по статусу с пагинацией"""
+        return await self.order_repo.get_by_status(status=status, limit=limit, offset=offset)
+    
+    async def get_orders_count_by_filter(self, status: OrderStatus) -> int:
+        """Получить количество заказов по статусу"""
+        return await self.order_repo.get_count_by_status(status=status)
+
+    async def delete_order(
+            self, 
+            order_id: int
+    ) -> None:
+        """Удалить заказ по ID"""
+        order = await self.order_repo.get(order_id)
+        if not order:
+            raise ValueError(f"Заказ с ID {order_id} не найден")
+        
+        await self.order_repo.delete(order_id)
+        await self.session.commit()
+
+        return True
+    
+    async def get_orders_by_filter(self, status: OrderStatus, limit: Optional[int] = None, offset: Optional[int] = 0) -> List[Order]:
+        """Получить заказы по статусу с пагинацией"""
+        return await self.order_repo.get_by_status(status=status, limit=limit, offset=offset)
+    
+    async def get_orders_count_by_filter(self, status: OrderStatus) -> int:
+        """Получить количество заказов по статусу"""
+        return await self.order_repo.get_count_by_status(status=status)

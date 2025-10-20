@@ -1,5 +1,5 @@
 from typing import Optional, List
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -21,21 +21,25 @@ class OrderRepository(BaseRepository[Order]):
         )
         return result.scalar_one_or_none()
     
-    async def get_by_status(self, status: OrderStatus) -> List[Order]:
-        """Получить заказы по статусу"""
-        result = await self.session.execute(
-            select(Order)
-            .options(selectinload(Order.required_skills))
-            .where(Order.status == status)
-            .order_by(Order.datetime.desc())
-        )
+    async def get_by_status(self, status: OrderStatus, limit: Optional[int] = None, offset: Optional[int] = 0) -> List[Order]:
+        """Получить заказы по статусу с пагинацией"""
+        query = select(Order).where(Order.status == status).order_by(Order.datetime.desc())
+        if limit is not None:
+            query = query.limit(limit).offset(offset)
+        result = await self.session.execute(query)
         return list(result.scalars().all())
     
-    async def get_all(self, limit: int = None) -> List[Order]:
-        """Получить все заказы"""
+    async def get_count_by_status(self, status: OrderStatus) -> int:
+        """Получить количество заказов по статусу"""
+        query = select(func.count()).select_from(Order).where(Order.status == status)
+        result = await self.session.execute(query)
+        return result.scalar_one()
+    
+    async def get_all(self, limit: Optional[int] = None, offset: Optional[int] = 0) -> List[Order]:
+        """Получить все заказы с пагинацией"""
         query = select(Order).order_by(Order.datetime.desc())
-        if limit:
-            query = query.limit(limit)
+        if limit is not None:
+            query = query.limit(limit).offset(offset)
         result = await self.session.execute(query)
         return list(result.scalars().all())
     
@@ -93,3 +97,31 @@ class OrderRepository(BaseRepository[Order]):
             .order_by(Order.datetime.desc())
         )
         return list(result.scalars().all())
+    
+    async def get_count(self) -> int:
+        """Получить общее количество заказов"""
+        query = select(func.count()).select_from(Order)
+        result = await self.session.execute(query)
+        return result.scalar_one()
+
+    async def get_by_date_range(self, start_date: date, end_date: date, limit: Optional[int] = None, offset: Optional[int] = 0) -> List[Order]:
+        """Получить заказы по диапазону дат с пагинацией"""
+        query = select(Order).where(
+            Order.datetime >= start_date,
+            Order.datetime <= end_date + timedelta(days=1)  # Assuming import from datetime
+        ).order_by(Order.datetime.desc())
+        if limit is not None:
+            query = query.limit(limit).offset(offset)
+        result = await self.session.execute(query)
+        return list(result.scalars().all())
+    
+
+    async def get_count_by_date_range(self, start_date: date, end_date: date) -> int:
+        """Получить количество заказов по диапазону дат"""
+        query = select(func.count()).select_from(Order).where(
+            Order.datetime >= start_date,
+            Order.datetime <= end_date + timedelta(days=1)
+        )
+        result = await self.session.execute(query)
+        return result.scalar_one()
+    
